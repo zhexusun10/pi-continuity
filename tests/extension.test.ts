@@ -44,7 +44,7 @@ for (const [name, content] of [
     assert.equal(h.continuations().length, 1);
     assert.equal(h.events.filter((event) => event.type === "agent_settled").length, 1);
     assert.equal(h.events.at(-1)?.type, "agent_settled");
-    assert.match(allText(h.requests[1]!), /Continue\./);
+    assert.doesNotMatch(allText(h.requests[1]!), /Your response hit an output limit/);
     assert.doesNotMatch(JSON.stringify(h.requests[1]), /INCOMPLETE_SIGNATURE/);
     if (name === "thinking-only") assert.match(allText(h.requests[1]!), /work out the next step/);
     if (name === "mixed") assert.match(allText(h.requests[1]!), /partial thought.*partial answer/s);
@@ -104,7 +104,8 @@ for (const stopReason of ["stop", "toolUse"] as const) {
     const next = h.requests[1]!;
     const resultIndex = next.findIndex((message) => message.role === "toolResult");
     const continueIndex = next.findIndex((message) => message.role === "user" && allText([message]).startsWith("Continue."));
-    assert.ok(resultIndex > 0 && continueIndex > resultIndex);
+    assert.ok(resultIndex > 0);
+    assert.equal(continueIndex, -1);
     assert.deepEqual(h.errors, []);
   });
 }
@@ -129,9 +130,22 @@ test("native retry gets the readable partial checkpoint without an extra fallbac
   assert.equal(h.continuations().length, 0);
   assert.ok(h.events.some((event) => event.type === "auto_retry_start"));
   assert.equal(h.events.filter((event) => event.type === "agent_settled").length, 1);
+  assert.doesNotMatch(JSON.stringify(h.manager.buildSessionProjection().messages), /preserve this plan/);
   assert.deepEqual(h.errors, []);
 });
 
+test("stream fallback allows six attempts by default", async (t) => {
+  const h = await createHarness();
+  t.after(h.cleanup);
+  h.setResponses([
+    ...Array.from({ length: 6 }, () => broken("fetch failed")),
+    fauxAssistantMessage("done"),
+  ]);
+  await h.session.prompt("Finish the task");
+  assert.equal(h.requests.length, 7);
+  assert.equal(h.continuations().length, 6);
+  assert.deepEqual(h.errors, []);
+});
 test("extra stream recovery follows exhausted native retries, never races them", async (t) => {
   const h = await createHarness({ nativeRetries: 1 });
   t.after(h.cleanup);
@@ -139,8 +153,11 @@ test("extra stream recovery follows exhausted native retries, never races them",
   await h.session.prompt("Finish the task");
   assert.equal(h.requests.length, 3);
   assert.equal(h.continuations().length, 1);
-  assert.equal(h.checkpoints().length, 2);
-  assert.match(allText(h.requests[2]!), /plan one.*plan two.*Continue\./s);
+  assert.equal(h.checkpoints().length, 3);
+  const recoveredContext = allText(h.requests[2]!);
+  assert.match(recoveredContext, /plan one.*plan two/s);
+  assert.doesNotMatch(recoveredContext, /The provider stream failed/);
+  assert.equal((recoveredContext.match(/The preceding provider response was interrupted/g) ?? []).length, 1);
   assert.equal(h.events.filter((event) => event.type === "agent_settled").length, 1);
   assert.deepEqual(h.errors, []);
 });
@@ -228,6 +245,48 @@ test("truncation budget spans retries and resets for the next actual user reques
   assert.equal(h.continuations().length, 3);
 });
 
+test("repeated truncation merges bounded progress into one active continuation", async (t) => {
+  const h = await createHarness({ flags: { "continuity-max-resumes": "3" } });
+  t.after(h.cleanup);
+  h.setResponses([length("FIRST_PARTIAL"), length("SECOND_PARTIAL"), fauxAssistantMessage("done")]);
+  await h.session.prompt("Finish the task");
+  assert.equal(h.requests.length, 3);
+  const latest = allText(h.requests[2]!);
+  assert.match(latest, /FIRST_PARTIAL/);
+  assert.match(latest, /SECOND_PARTIAL/);
+  assert.equal((latest.match(/^Continue\./gm) ?? []).length, 0);
+});
+
+test("a checkpoint character cap bounds merged stream context", async (t) => {
+  const h = await createHarness({
+    nativeRetries: 1,
+    flags: { "continuity-checkpoint-max-chars": "120" },
+  });
+  t.after(h.cleanup);
+  h.setResponses([
+    broken("fetch failed", "FIRST_" + "a".repeat(160)),
+    broken("fetch failed", "SECOND_" + "b".repeat(160)),
+    fauxAssistantMessage("done"),
+  ]);
+  await h.session.prompt("Finish the task");
+  const latest = allText(h.requests[2]!);
+  assert.match(latest, /older partial context omitted/);
+  assert.equal((latest.match(/The preceding provider response was interrupted/g) ?? []).length, 1);
+});
+
+test("stale recovery artifacts are filtered before a new user request", async (t) => {
+  const h = await createHarness({ flags: { "continuity-stream-retries": "1" } });
+  t.after(h.cleanup);
+  h.setResponses([
+    broken("fetch failed", "OLD_PARTIAL"),
+    broken("fetch failed", "OLD_PARTIAL_2"),
+  ]);
+  await h.session.prompt("First task");
+  h.setResponses([fauxAssistantMessage("new task done")]);
+  await h.session.prompt("Second task");
+  assert.doesNotMatch(allText(h.requests[2]!), /OLD_PARTIAL/);
+  assert.match(allText(h.requests[2]!), /Second task/);
+});
 test("stream budget is not reset by each native agent_start", async (t) => {
   const h = await createHarness({ nativeRetries: 1, flags: { "continuity-stream-retries": "1" } });
   t.after(h.cleanup);
@@ -250,6 +309,7 @@ test("disabled extension does not alter truncation or failed-stream context", as
   assert.equal(h.continuations().length, 0);
   assert.equal(h.checkpoints().length, 0);
   assert.equal(h.manager.getBranch().filter((entry) => entry.type === "context_edit").length, 0);
+  assert.match(allText(h.requests[1]!), /x{64}/);
 });
 
 test("boundary entries from earlier extensions are preserved", async (t) => {

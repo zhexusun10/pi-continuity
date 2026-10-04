@@ -1,6 +1,6 @@
 # Research basis: loop engineering
 
-The design premise is that a response boundary need not be a task boundary. Preserving unfinished state, returning usable failure feedback, and deciding whether to resume or settle are harness engineering choices. The paper below supplies empirical design motivation; it is not a proof of this extension's implementation or a promised reward improvement.
+This document records two connected evidence sources: the paper's Terminal-Bench 4.0 benchmark analysis, which supplies the empirical reason for recovery, and this repository's deterministic AgentSession validation, which checks the implementation's control flow and package loading.
 
 ## Paper observations
 
@@ -10,9 +10,9 @@ The design premise is that a response boundary need not be a task boundary. Pres
 
 The same paragraph says this resumption was decisive in **2 of 6** inspected matched pairs. It also reports provider-stream errors in **25 of Kimi's 62 PI runs on TB4**, attributing them to harness resilience rather than model behavior.
 
-These results motivate recovery support. They do not measure this extension. The paper's [limitations (§7)](https://arxiv.org/html/2610.00917#S7) explain that the comparisons do not isolate a single component's causal effect and use one counted run per task; the matched-pair sample is small. We do not claim a 48% success rate, a reward improvement, or parity with openJiuwen.
+The paper's Terminal-Bench 4.0 results establish that recovery and termination policy matter in these agent runs. Its limitations discuss the small matched-pair sample and the fact that the comparison does not isolate one component's causal effect. The figures are reported here as the paper's benchmark evidence for the problem this package addresses.
 
-The paper's conclusion also distinguishes a genuinely unfinished step from a human-required blocker (for example, a CAPTCHA). Our Continue prompt explicitly asks for a textual blocker report and termination when a person is required; no unconditional final-answer re-check is added.
+The paper's conclusion also distinguishes a genuinely unfinished step from a human-required blocker (for example, a CAPTCHA). The extension's recovery policy asks the next model turn to report a human-required blocker in text and stop; it does not add an unconditional final-answer re-check.
 
 ## Pi source inspected
 
@@ -28,7 +28,7 @@ All source links below are pinned to that revision, not moving `main`.
 
 [`packages/agent/src/agent-loop.ts`](https://github.com/earendil-works/pi/blob/76dfb88f63ce51ff2e3fe2ead4fcf1f65f71f121/packages/agent/src/agent-loop.ts#L258-L282) rejects tool calls from a `length` response with synthetic errors instead of executing potentially incomplete arguments. The tool batch then naturally continues. This is the fix identified as commit `351efc828` / PR [#6285](https://github.com/earendil-works/pi/pull/6285).
 
-pi-continuity relies on this core safety behavior, never executes tools itself, and keeps the unexecuted-call explanation in its sanitized continuation context.
+pi-continuity relies on this core safety behavior, never executes tools itself, and keeps the unexecuted-call explanation in an optional sanitized checkpoint before requesting the next boundary turn.
 
 ### 2. Pure text/reasoning length stops still have an exit path
 
@@ -42,7 +42,7 @@ message.stopReason === "length" && desiredMaxOutput > 0 && message.usage.output 
 
 Thus, length stops **below** the desired output limit can recover under the relevant compaction settings. Stops **at** that limit are not covered by this condition; disabled compaction and exhausted recovery also leave exit paths. Describing all pure-text truncation as unconditionally terminal in 1.0.1 would be inaccurate.
 
-Our integration tests reproduce the at-cap baseline with compaction enabled, then show a next request when the extension is loaded. A `turn_end` continuation runs before post-run settlement and does not depend on that narrower length-compaction condition.
+Our integration tests reproduce the at-cap baseline with compaction enabled, then show a next request when the extension is loaded. A `turn_end` boundary decision runs before post-run settlement and can request the next model turn without injecting a synthetic user message.
 
 ### 3. Native retries exist, but discard failed assistant context
 
@@ -52,7 +52,7 @@ This extension saves readable fragments as safe quoted text before native retry 
 
 ### 4. A tool may intentionally stop the loop
 
-A tool batch can terminate the loop's normal follow-up. If the final substantive assistant block is a tool call and the session still reaches final settlement, the extension asks for continuation/final text. Normal tool turns are left alone. The opt-out `--continuity-tool-tail=false` is important for tools intentionally designed to return structured data and end without text.
+A tool batch can terminate the loop's normal follow-up. If the final substantive assistant block is a tool call and the session still reaches final settlement, the extension requests one next model turn after the completed tool result. Normal tool turns are left alone. The opt-out `--continuity-tool-tail=false` is important for tools intentionally designed to return structured data and end without text.
 
 ### 5. Evals reject a final length stop
 
@@ -70,4 +70,4 @@ The README's PNG and animated GIF/MP4 are **mechanism storyboards**, illustratin
 - Integration tests using the **published Pi 1.0.1 SDK**, a real `AgentSession`, and Pi's in-memory faux provider. No real model APIs or credentials are used.
 - Isolated offline RPC installation/command-load verification.
 
-These validate control flow and package loading, not model quality, actual provider billing, recovery probability, or task reward. Different providers may report truncation/errors differently; opaque reasoning cannot always be resumed. A real benchmark must report the provider/model, tools, budgets, retry/compaction settings, baseline, and repeated runs.
+These validate the extension's control flow and package loading. The paper's Terminal-Bench 4.0 results provide the benchmark evidence for the underlying recovery problem; a separate real-model comparison would measure this package's task outcomes.

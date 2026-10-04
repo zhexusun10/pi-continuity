@@ -1,7 +1,7 @@
 {
   "name": "pi-continuity",
   "version": "0.1.0",
-  "description": "Robust loop engineering for Pi: preserve progress and recover output truncation, broken streams, and tool-call endings.",
+  "description": "Pi coding-agent extension that recovers truncated turns, failed streams, empty responses, and terminal tool-call tails through public session boundaries.",
   "type": "module",
   "license": "MIT",
   "author": "Jerry (zhexusun10)",
@@ -11,8 +11,16 @@
   },
   "bugs": { "url": "https://github.com/zhexusun10/pi-continuity/issues" },
   "homepage": "https://github.com/zhexusun10/pi-continuity#readme",
-  "keywords": ["pi-package", "pi", "pi-agent", "pi-extension", "coding-agent", "loop-engineering", "harness-resilience", "recovery", "output-truncation"],
-  "files": ["extensions/", "lib/", "README.md", "docs/README.zh-CN.md", "docs/design.md", "docs/evidence.md", "docs/assets.md", "LICENSE", "CHANGELOG.md"],
+  "keywords": [
+    "pi-package", "pi", "pi-coding-agent", "pi-agent", "pi-extension", "agent-session",
+    "coding-agent", "context-management", "harness-resilience", "loop-engineering",
+    "stream-recovery", "output-truncation", "tool-calls", "retry"
+  ],
+  "files": [
+    "extensions/", "lib/", "README.md", "CONTRIBUTING.md", "docs/README.zh-CN.md",
+    "docs/design.md", "docs/evidence.md", "docs/assets.md", "docs/releasing.md",
+    "LICENSE", "CHANGELOG.md"
+  ],
   "pi": {
     "extensions": ["./extensions/index.ts"],
     "image": "https://raw.githubusercontent.com/zhexusun10/pi-continuity/main/assets/loop-engineering.png?v=2",
@@ -36,6 +44,6 @@
     "test": "tsx --test tests/*.test.ts",
     "verify:load": "node scripts/verify-install.mjs",
     "assets": "python scripts/render-assets.py",
-    "prepublishOnly": "npm run check && npm test"
+    "prepublishOnly": "npm run check && npm test && npm run verify:load"
   }
 }

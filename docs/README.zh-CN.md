@@ -1,120 +1,124 @@
 # pi-continuity
 
-**为 Pi 提供更健壮的 loop engineering。**
+**在不重放损坏协议状态的前提下恢复被打断的 Pi 轮次。**
 
-一轮输出结束，不等于任务完成。这个 extension 在截断和流错误后保留进展，并区分“工具调用完成”和“整个任务完成”，把恢复与停止变成明确的运行时策略。
+[English](../README.md) · [设计](design.md) · [研究与源码依据](evidence.md) · [源码](../extensions/index.ts)
 
-[English](../README.md) · [研究依据](evidence.md) · [循环设计](design.md) · [源码](../extensions/index.ts)
+## 为什么需要它？
 
-## 为什么是 loop engineering？
+设计动机来自论文 [Finding the Right Fit: Model–Harness Interactions across Agent Tasks](https://arxiv.org/html/2610.00917) 的 **Terminal-Bench 4.0** benchmark 分析。论文 §5.1 记录：openJiuwen 在输出上限后恢复了 **100 个 run**，其中 **48 个后来获得非零 reward**；人工检查的 **6 个 matched pair 中，2 个的恢复机制是决定性因素**。同一分析还记录了 Kimi 在 PI 的 62 个 TB4 run 中有 **25 个 provider stream failure**，将部分问题归因于 harness resilience。
 
-[Finding the Right Fit: Model–Harness Interactions across Agent Tasks，§5.1](https://arxiv.org/html/2610.00917#S5.SS1) 指出，**harness 如何返回失败、恢复中断和决定停止**，会影响 model–harness 的配合：
-
-- openJiuwen 在输出上限后保留 partial reasoning 并重新提示继续，恢复了 **100 个 run，其中 48 个后来获得非零 reward**。
-- 在人工检查的 **6 个 matched pair 中，2 个的恢复机制是决定性因素**。
-- 论文还将 provider stream 失败归于 harness resilience，而不是简单归为模型能力不足。
-
-这是论文中的观测，**不是本扩展的实测成绩，也不是普适成功率保证**。它给出的设计依据是：不要把可恢复的轮次结束，过早当作任务结束。
-
-pi-continuity 将这个依据落实为：**保留可用状态 → 原生恢复优先 → 按策略继续未完成任务 → 在合适的边界停止**。Continue 只是发给模型的指令；loop engineering 在于决定**什么时候继续、保留什么上下文、什么时候必须停止**。取消、审批、人工阻塞和恢复预算仍然有效。
-
-Pi 已有截断工具保护，以及对部分 length stop 的 compact-and-retry；本扩展补齐仍然存在的退出路径，包括达到期望输出上限的纯文字/思考截断。详见[论文与版本固定的源码分析](evidence.md)。
-
-![循环机制示意：区分轮次中断与任务完成，保留可读进展，并在策略约束内继续](https://raw.githubusercontent.com/zhexusun10/pi-continuity/main/assets/loop-engineering.png?v=2)
+这些 benchmark 结果说明，输出边界不一定等于任务边界。pi-continuity 将这个问题落实为 session 策略：保留安全进展，让 Pi 原生 retry 先运行，并在仍可恢复时通过公开 boundary 请求下一次模型轮次。论文依据、固定版本源码和仓库验证见[研究与源码依据](evidence.md)。
 
 ## 安装
+
+```bash
+pi install npm:pi-continuity
+```
+
+也可以通过 GitHub 安装：
 
 ```bash
 pi install git:github.com/zhexusun10/pi-continuity
 ```
 
-重新启动 Pi，或 `/reload`。需要具有可操作边界事件的 **Pi 1.0.1+**，以及 Node.js 22.19+。这是 **coding-agent 层的扩展**：Pi CLI 和使用 `AgentSession`、正确加载并绑定扩展的 SDK 程序都可以使用。不修改 Pi 内核，无需构建。
+安装后重新启动 Pi，或在当前会话执行 `/reload`。扩展不修改 Pi 文件、不直接访问 provider、不安装运行时依赖。
 
-## 看恢复策略
+需要具有可操作 session boundary 的 **Pi 1.0.1+** 和 Node.js 22.19+。它适用于 Pi CLI，也适用于正确加载并绑定扩展的 `AgentSession` SDK 程序。
 
-![机制动画：截断后续跑、原生重试优先的流恢复，以及工具结果之后再追加 Continue](https://raw.githubusercontent.com/zhexusun10/pi-continuity/main/assets/demo.gif)
+## 它解决什么问题？
 
-*这是绘制的机制 storyboard，不是 Pi TUI 录屏，也不是真实模型实验。流恢复先让原生重试完成；工具尾部续跑发生在结果之后，不重复执行已完成的工具。* [MP4](https://raw.githubusercontent.com/zhexusun10/pi-continuity/main/assets/demo.mp4) · [渲染源码与来源说明](assets.md)。
+| Pi 原本准备停止的情况 | pi-continuity 的处理 |
+| --- | --- |
+| `stopReason: "length"`：文字、纯思考、空输出、混合内容或工具调用 | 从下一次模型投影中移除不完整 assistant 协议；有可读进展时保存有界 partial，并在 `turn_end` 请求下一轮模型请求。 |
+| provider stream 失败 | 先让 Pi 原生 session retry 处理；原生恢复耗尽后，移除失败 assistant，必要时保存有界 checkpoint，再按分段等待策略请求下一轮。 |
+| 成功但为空的 assistant 输出 | 移除空 assistant，并使用 stream recovery 预算请求下一轮。 |
+| 工具结果已经完成但任务停在 tool call | 保留已完成的 tool result，在 `agent_before_settle` 请求下一轮；不添加合成 user 指令，也不重复执行工具。 |
 
-## 三项功能
+扩展使用 Pi 提供的公开 session boundary API：通过 `context_edit` 修复下一次模型请求的投影，通过 `continue: true` 让 `AgentSession` 发起下一轮。它不会为每次 retry 添加隐藏的 `Continue` user 文本。只有需要传递可读 partial 或说明中断工具未执行时，才添加隐藏 checkpoint。
 
-1. **Output Truncation 后继续任务。** 对文字、纯思考、空输出、混合内容和工具调用的 `stopReason: "length"`，在 `turn_end` 追加 Continue，并请求下一轮。明确标注输出上限的 provider error 也可以恢复。
-2. **加强 stream recovery。** 在错误发生后，把可读 partial 内容保存为 checkpoint，供 Pi 原生重试使用；原生重试/恢复耗尽后，再补有限次数的退避重试。支持 EOF、未完整结束的 stream、socket reset，以及 Pi 已有的瞬时错误分类。空的成功输出也进入这个有限恢复机制。
-3. **停在 tool call 时追加 Continue。** 在 `agent_before_settle` 确认任务确实要停止、最后一个有效 assistant 内容块仍然是 tool call，才补 Continue。普通工具轮次本来就会自然续跑，不会每调用一次工具就插入 Continue。
+普通工具调用本来就会让 Pi 继续。正常文字结束、显式取消、认证/权限/配额/billing 错误、安全拒绝和未知确定性错误不会被扩展自动重试；输入上下文超限仍由 Pi compaction 处理。
 
-正常文字结束、用户取消、认证/权限/余额/配额错误、安全拒绝和未知确定性错误不会被自动续跑。输入上下文超限仍由 Pi compaction 处理。
+## 三种恢复路径
 
-### 如何保存 partial reasoning？
+### Output truncation
 
-直接重放残缺工具参数、未完成的 signed reasoning 可能让下一次 provider 请求也失败。本扩展用追加式 `context_edit` 从**模型上下文**中省略被截断的 assistant 与其合成错误工具结果，再将可读文字/思考作为明确标注的引用文本存入隐藏 custom message。
+扩展保留原始 session history，但用 `context_edit` 让不完整 assistant 和相关合成结果不再进入下一次模型请求。可读文字和未加密 reasoning 会被 JSON 引用为有界 checkpoint；工具参数、签名、response ID 和 redacted reasoning 不会复制。
 
-- 原始历史、usage 和此前已经完成的工具结果仍然保留。
-- 残缺 tool call 不执行，模型必须重新给出完整参数。
-- 不复制 tool arguments、签名或被 redacted/encrypted 的思考。
-- 保留的是可读进展，不是 provider 的不透明 reasoning 状态，也不是从某个 token 位置精确接续解码。
+Pi 核心负责保证截断 tool call 不会被执行。下一轮会知道中断工具没有执行，必要时必须重新生成完整参数。
 
-已有排队用户输入或其他扩展的 continuation 优先，不额外插入重复 Continue；仍会清理截断的协议内容，避免污染下一次请求。隐藏 checkpoint 会由 Pi 持久化，并作为 user-role context 传给模型；因此 session 文件也可能含可读思考内容。
+### Stream recovery
 
-## 配置
+Pi 原生 retry 在 `agent_before_settle` 之前运行。扩展在 `turn_end` 保存 partial checkpoint，使原生 retry 在省略失败 assistant 后仍能看到可读进展。原生 retry 耗尽后，扩展通过相同的公开 boundary 机制修复投影并请求下一轮。
+
+默认额外 fallback 为 6 次：
 
 ```text
+第 1～3 次：每次等待 5 秒
+第 4～6 次：每次等待 10 秒
+```
+
+### Tool-call tail
+
+如果最后一个有效 assistant 内容块是 tool call，且 Pi 已经准备结束，扩展保留完成的 tool result，直接请求下一轮模型。普通工具轮次不会额外触发这个逻辑。
+
+对故意以结构化输出或 handoff 工具结束任务的场景，可以关闭：
+
+```bash
+pi --continuity-tool-tail=false
+```
+
+## 控制项
+
+```text
+/pi-continuity
 /pi-continuity status
 /pi-continuity off
 /pi-continuity on
 ```
 
-`status` 显示当前/上一条用户请求的恢复次数，不显示私密 partial 内容。开关仅作用于当前已加载 session，重载后恢复 CLI 默认值。关闭不会删除旧 checkpoint，也不会关闭 Pi 原生重试。
+`status` 显示当前或上一条真实用户请求的恢复次数，不打印 partial 内容。开关作用于当前加载的 session；`/reload` 后恢复 CLI 默认值。
 
 | 参数 | 默认 | 含义 |
-| --- | --- | --- |
+| --- | ---: | --- |
 | `--continuity` | `true` | `--continuity=false` 关闭扩展恢复。 |
-| `--continuity-max-resumes` | `20` | 每条真实用户请求最多由扩展安排 20 次续跑。`0` 不注入；`unlimited` 无此上限。 |
-| `--continuity-stream-retries` | `3` | 原生恢复结束后最多补 3 次 stream/空响应恢复，也计入总上限。`0` 关闭流 checkpoint 和额外恢复。 |
-| `--continuity-stream-delay-ms` | `1000` | stream 退避基础毫秒数，逐次翻倍，每次最多等待 8 秒。 |
-| `--continuity-tool-tail` | `true` | 用 `--continuity-tool-tail=false` 兼容刻意无文字终止的 structured-output / handoff 工具。 |
+| `--continuity-max-resumes` | `8` | 每条真实用户请求最多由扩展安排 8 次模型轮次。`0` 禁用；`unlimited` 移除总上限。 |
+| `--continuity-stream-retries` | `6` | 原生 retry 之后最多补 6 次 stream/空响应恢复；默认 3 次 5 秒，再 3 次 10 秒。`0` 禁用 fallback。 |
+| `--continuity-stream-delay-ms` | `5000` | stream/空响应额外恢复的基础等待毫秒数；第 1～3 次使用该值，之后使用 2 倍，最多 10 秒。 |
+| `--continuity-checkpoint-max-chars` | `12000` | 活跃 checkpoint 中最多合并的可读 partial 字符数，硬上限 64000。`0` 不复制 partial 文本/思考。 |
+| `--continuity-tool-tail` | `true` | 是否恢复停在 tool call 的任务。 |
 
-true/false 开关需要显式值，例如 `--continuity true` 或 `--continuity=false`，不是只写参数名的 presence-only flag。
+布尔参数必须显式写值，例如 `--continuity=false`，不是 presence-only flag。
 
 ```bash
-pi --continuity-max-resumes 50 --continuity-stream-retries 5
-pi --continuity-max-resumes unlimited
+pi --continuity-max-resumes 12 --continuity-stream-retries 6
+pi --continuity-stream-delay-ms 5000
+pi --continuity-checkpoint-max-chars 8000
 pi --continuity-tool-tail=false
 ```
 
-上限随真实新用户请求重置，不随每次原生重试的 `agent_start` 重置；状态只存在于内存，重载/重启后会重置。它限制的是扩展安排的续跑，不限制 Pi 原生工具循环或 provider 内部重试。每次 fallback 后原生重试可能再次发生，因此总模型调用次数不能简单把两项 retry 上限相加。
+这些预算按真实新用户请求重置，不按 Pi 原生 retry 的每次 `agent_start` 重置。它们只限制扩展安排的模型轮次，不限制 Pi 原生 retry、provider 内部 retry、正常工具循环或嵌套模型调用；无人值守运行仍需要 harness 层总时间、调用次数和 token 预算。
 
-**续跑会增加 token 和时间成本；unlimited 可能无限循环。** Continue 不能证明任务完成，自动化运行仍需要独立校验和 harness 层时间/token 预算。遇到必须由人处理的阻塞，提示会要求模型用文字说明并停止，不绕过审批。
+## CLI、SDK 与 agent-core 边界
 
-## Harness 与边界
-
-### CLI、SDK 与 agent-core 到底有什么区别？
-
-| 使用方式 | 集成方式 |
+| 使用方式 | 要求 |
 | --- | --- |
-| **Pi CLI：TUI / RPC / JSON / print** | 正常安装，coding-agent 运行时负责加载扩展。 |
-| **coding-agent SDK：`AgentSession`** | 通过 resource loader 加载扩展，并调用 `session.bindExtensions(...)`；这与 CLI 使用的是同一层 session 机制。 |
-| **直接使用 `pi-agent-core` 的 `Agent` / `agentLoop()`** | 这些是底层构件，不是 extension host；不会自动加载本包，也没有本扩展使用的完整 session 边界契约，需要额外适配。 |
+| Pi CLI：TUI、RPC、JSON、print | 正常安装；Pi coding-agent runtime 会加载并绑定扩展。 |
+| `AgentSession` SDK | 通过 resource loader 加载扩展，并在实际接收 prompt 的同一个 session 上调用 `session.bindExtensions(...)`。等待完整的 `session.prompt()` 或 `agent_settled`。 |
+| 直接使用 `pi-agent-core` 的 `Agent` / `agentLoop()` | 本包不会自动挂接裸 core loop；需要额外 adapter 实现等价的 session 持久化与 boundary 行为。 |
 
-原先“bare pi-agent-core loops are not supported”的意思是**不能把这个 extension 直接插入未经过 coding-agent session 封装的底层循环**，不是说 agent-core 无法恢复，更不是 SDK 不支持。`AgentSession` 本身就建立在 agent-core 之上。
+`agent_end` 可能早于原生 retry、compaction、排队输入或扩展 fallback。需要最终结果的 harness 不能把第一个 `agent_end` 当作最终结束。
 
-本包依赖的是 `ExtensionAPI`、session 上下文投影、可持久化的 boundary drafts，以及 `agent_before_settle`。底层循环也可以用自己的 hooks 实现恢复策略，但本仓库没有提供那层适配器。[分层说明](design.md#integration-layers)。
+## 限制
 
-必须把扩展加载进实际评测使用的同一个 `AgentSession`；等待 `session.prompt()` 完整结束，或等待 `agent_settled`，不能把第一个 `agent_end` 当作任务彻底结束。
+- 每次恢复都是新的模型请求，不是 provider decoder 的 token 级恢复。
+- 模型仍可能重复操作、遗漏上下文或错误停止；任务结果需要独立验证。
+- 不同 provider 的错误文案不同。分类器覆盖 Pi 自带分类和常见 HTTP/传输错误，但对未知确定性错误保持保守。
+- 进程被杀、永久挂起的 stream、无限阻塞的工具、provider 从未暴露的内容和耗尽的 credits 无法恢复。
+- checkpoint 会由 Pi 持久化为模型上下文，session 文件可能包含可读 reasoning。
+- 其他扩展可以替换 boundary drafts 或 continuation decision；扩展加载顺序是组合边界，尤其要注意脱敏扩展。
 
-扩展不改变评分规则；成功恢复后最终 assistant 可以不再是 `length`，但不保证任务获得 reward。它也救不了提前在中间错误/第一个 `agent_end` 退出的外部 harness。
-
-无法处理进程被杀、没有结束信号的永久 stream 挂起、工具无限阻塞、provider 从未暴露的内容或余额耗尽。作用范围是主 agent 的 finalized turn，不是所有嵌套模型/总结调用。请另设 provider idle timeout 和 shell timeout。取消会阻止边界之后的下一次模型请求；若 post-run 边界没有活跃 abort signal，当前有限退避可能需要等完，Pi 才完成取消。
-
-本扩展不直接访问网络/文件，不做 telemetry；实际模型请求与 session 持久化由 Pi 完成。后加载扩展可以覆盖边界决策，特别是脱敏扩展需注意加载顺序。移除扩展不会删除历史 checkpoint。
-
-## 更新与移除
-
-```bash
-pi update git:github.com/zhexusun10/pi-continuity
-pi remove git:github.com/zhexusun10/pi-continuity
-```
-
-随后重启或 `/reload`。
+研究和源码依据见 [docs/evidence.md](evidence.md)。上面的 benchmark 数据来自论文的 Terminal-Bench 4.0 分析；仓库测试则验证本扩展的控制流和 package loading。
 
 ## 开发
 
@@ -127,8 +131,21 @@ npm pack --dry-run
 pi -e .
 ```
 
-现有测试使用真实 Pi `AgentSession` 和内存 faux provider，不需要 API key，不消耗付费模型 token。包含未加载本扩展的 Pi 对照、不同截断形态、原生重试顺序、上限、取消、排队输入和早先脱敏保护。安装验证使用隔离配置与 offline RPC。
+测试使用真实 Pi `AgentSession` 和内存 faux provider，不调用真实模型、不需要 API key、不产生付费请求。测试覆盖截断形态、原生 retry 顺序、6 次 fallback、分段等待、取消、排队输入、上下文修复、工具安全和 package loading。
 
-图片与动画独立于运行时测试；[渲染说明](assets.md)提供 PNG/GIF/MP4 的生成方法，不启动 Pi、不调用模型。
+图片和动画是机制 storyboard，不是 TUI 录屏或模型 benchmark。生成方法见 [docs/assets.md](assets.md)。
 
-MIT；独立社区扩展，并非 Pi 官方产品。
+## 更新与移除
+
+```bash
+pi update git:github.com/zhexusun10/pi-continuity
+pi remove git:github.com/zhexusun10/pi-continuity
+```
+
+随后重启 Pi 或执行 `/reload`。移除扩展不会删除已经存在的 session entries。
+
+仓库协作和发布流程见 [CONTRIBUTING.md](../CONTRIBUTING.md) 与 [docs/releasing.md](releasing.md)。
+
+## License
+
+MIT；独立社区 package，并非 Pi 官方产品。

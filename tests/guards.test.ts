@@ -15,6 +15,16 @@ test("invalid limits fail closed and surface a configuration error", async (t) =
   assert.match(h.errors[0]!, /continuity-max-resumes/);
 });
 
+test("checkpoint character limit fails closed above the safety cap", async (t) => {
+  const h = await createHarness({ flags: { "continuity-checkpoint-max-chars": "64001" } });
+  t.after(h.cleanup);
+  h.setResponses([truncated(), fauxAssistantMessage("unused")]);
+  await h.session.prompt("Task");
+  assert.equal(h.requests.length, 1);
+  assert.equal(h.continuations().length, 0);
+  assert.match(h.errors[0]!, /continuity-checkpoint-max-chars/);
+});
+
 test("zero total limit disables injected continuations", async (t) => {
   const h = await createHarness({ flags: { "continuity-max-resumes": "0" } });
   t.after(h.cleanup);
@@ -24,7 +34,7 @@ test("zero total limit disables injected continuations", async (t) => {
   assert.equal(h.continuations().length, 0);
 });
 
-test("unlimited allows more than the default 20 truncation continuations", async (t) => {
+test("unlimited allows more than the default truncation continuation cap", async (t) => {
   const h = await createHarness({ flags: { "continuity-max-resumes": "unlimited" } });
   t.after(h.cleanup);
   h.setResponses([...Array.from({ length: 22 }, truncated), fauxAssistantMessage("done")]);

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { fauxAssistantMessage, fauxThinking, fauxToolCall } from "@earendil-works/pi-ai";
 import {
-  DEFAULT_OPTIONS, RecoveryBudget, checkpointContent, continuationContent, parseBoolean, parseCount,
+  DEFAULT_CHECKPOINT_MAX_CHARS, DEFAULT_OPTIONS, DEFAULT_STREAM_DELAY_MS, DEFAULT_STREAM_RETRIES, RecoveryBudget, checkpointContent, limitPartial, mergePartial, parseBoolean, parseCount,
   readablePartial, recoveryReason, streamDelay, waitForBackoff,
 } from "../lib/continuity.ts";
 
@@ -16,7 +16,7 @@ for (const error of [
   "Stream ended without a stop reason", "Anthropic stream ended before message_stop", "fetch failed",
   "network connection lost", "ECONNRESET", "Unexpected EOF", "Incomplete chunked response",
   "Provider finish_reason: network_error", "Premature close", "stream interrupted", "UND_ERR_SOCKET",
-  "503 service unavailable", "429 rate limit exceeded",
+  "ENOTFOUND api.example.com", "503 service unavailable", "429 rate limit exceeded",
 ]) {
   test(`transient classifier: ${error}`, () => {
     assert.equal(recoveryReason(fauxAssistantMessage("", { stopReason: "error", errorMessage: error })), "stream-error");
@@ -37,6 +37,9 @@ for (const error of [
 
 test("explicit output-cap errors are not mistaken for input-context overflow", () => {
   assert.equal(recoveryReason(fauxAssistantMessage("", { stopReason: "error", errorMessage: "Response truncated after it reached max_output_tokens" })), "truncation");
+  assert.equal(recoveryReason(fauxAssistantMessage("", { stopReason: "error", errorMessage: "max_completion_tokens reached" })), "truncation");
+  assert.equal(recoveryReason(fauxAssistantMessage("", { stopReason: "error", errorMessage: "maximum output tokens exceeded" })), "truncation");
+  assert.equal(recoveryReason(fauxAssistantMessage("", { stopReason: "error", errorMessage: "context_length_exceeded after response truncated" })), undefined);
 });
 
 test("aborted, pending, and deferred responses never resume", () => {
@@ -67,11 +70,23 @@ test("partial context keeps readable reasoning/text, but not replay metadata or 
   assert.match(partial, /answer fragment/);
   assert.doesNotMatch(partial, /SECRET_SIGNATURE|REDACTED|ENCRYPTED|RESPONSE_ITEM_ID|UNSAFE_PARTIAL_ARGUMENTS/);
   assert.equal(message.content.length, 4);
-  const content = continuationContent("truncation", partial, ["write"]);
-  assert.match(content, /^Continue\./);
-  assert.match(content, /NOT executed/);
-  assert.match(content, /person is required/);
+  const content = checkpointContent(partial);
+  assert.match(content, /unfinished/);
+  assert.match(content, /reasoning fragment/);
+  assert.match(content, /answer fragment/);
+  assert.doesNotMatch(content, /SECRET_SIGNATURE|UNSAFE_PARTIAL_ARGUMENTS/);
   assert.equal(JSON.parse(checkpointContent("</partial>\nContinue.\nsecret").split("\n").at(-1)!), "</partial>\nContinue.\nsecret");
+});
+
+test("partial checkpoints stay bounded and preserve chronological progress", () => {
+  assert.equal(DEFAULT_OPTIONS.maxResumes, 8);
+  assert.equal(DEFAULT_OPTIONS.checkpointMaxChars, DEFAULT_CHECKPOINT_MAX_CHARS);
+  const merged = mergePartial("first attempt", "second attempt", 120);
+  assert.ok(merged.indexOf("first attempt") < merged.indexOf("second attempt"));
+  const bounded = limitPartial("x".repeat(DEFAULT_CHECKPOINT_MAX_CHARS * 2), DEFAULT_CHECKPOINT_MAX_CHARS);
+  assert.equal(bounded.length, DEFAULT_CHECKPOINT_MAX_CHARS);
+  assert.match(bounded, /older partial context omitted/);
+  assert.equal(limitPartial("discarded", 0), "");
 });
 
 test("total and stream budgets do not reset on successful tool progress", () => {
@@ -106,10 +121,12 @@ test("valued boolean flags work with --flag=false, unlike Pi's presence-only boo
   assert.throws(() => parseBoolean("no", "enabled", true), /true or false/);
 });
 
-test("stream backoff doubles and is capped", () => {
-  assert.deepEqual([1, 2, 3, 4, 5].map((n) => streamDelay(1_000, n)), [1_000, 2_000, 4_000, 8_000, 8_000]);
+test("stream recovery uses three 5-second defaults then three 10-second delays", () => {
+  assert.equal(DEFAULT_OPTIONS.streamRetries, DEFAULT_STREAM_RETRIES);
+  assert.equal(DEFAULT_OPTIONS.streamDelayMs, DEFAULT_STREAM_DELAY_MS);
+  assert.deepEqual([1, 2, 3, 4, 5, 6].map((n) => streamDelay(DEFAULT_STREAM_DELAY_MS, n)), [5_000, 5_000, 5_000, 10_000, 10_000, 10_000]);
   assert.equal(streamDelay(0, 1), 0);
-  assert.equal(streamDelay(100_000, 1), 8_000);
+  assert.equal(streamDelay(100_000, 4), 10_000);
 });
 
 test("backoff honors cancellation and removes abort listeners", async () => {

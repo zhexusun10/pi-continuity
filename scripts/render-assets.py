@@ -10,7 +10,7 @@ from imageio_ffmpeg import get_ffmpeg_exe
 
 ROOT = Path(__file__).resolve().parents[1]
 ASSETS = ROOT / "assets"
-W, H = 1280, 840
+W, H = 1280, 780
 BG, PANEL, BORDER = "#0b0e12", "#151a21", "#303944"
 WHITE, MUTED, ACCENT, WARN = "#edf2f7", "#a2adba", "#85d6be", "#e7aa9e"
 
@@ -105,7 +105,7 @@ def hero():
         text(draw, (left + 23, 634), title, 23, kind="bold")
         text(draw, (left + 23, 677), line1, 18, MUTED)
         text(draw, (left + 23, 707), line2, 18, MUTED)
-    return image.crop((0, 0, W, 780))
+    return image
 
 
 # Hand-authored design paths, not captured execution logs or new experiments.
@@ -187,8 +187,6 @@ def demo_frame(case, visible):
     text(draw, (658, 626), f"POLICY STAGES  {visible} / 6", 16, ACCENT, "mono")
     text(draw, (56, 696), case["setup"], 20, MUTED)
     text(draw, (56, 730), case["guard"], 20, ACCENT)
-    draw.line((56, 770, 1224, 770), fill=BORDER, width=1)
-    text(draw, (56, 787), "Mechanism storyboard. Not a recorded Pi session or model experiment.", 17, MUTED, "mono")
     return image
 
 

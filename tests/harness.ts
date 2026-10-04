@@ -65,7 +65,8 @@ export async function createHarness(options: {
   }
   return {
     session, manager, faux, requests, events, errors, setResponses,
-    continuations: () => manager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === CONTINUATION_TYPE),
+    continuations: () => manager.getBranch().filter((entry) =>
+      (entry.type === "custom" || entry.type === "custom_message") && entry.customType === CONTINUATION_TYPE),
     checkpoints: () => manager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === CHECKPOINT_TYPE),
     cleanup: () => { session.dispose(); rmSync(root, { recursive: true, force: true }); },
   };
