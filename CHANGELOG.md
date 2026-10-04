@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- PNG and GIF/MP4 mechanism illustrations with reproducible rendering source and explicit provenance; no new model experiments.
+- Gallery image/video metadata.
+
+### Changed
+
+- Lead English/Chinese documentation with the paper-based case for robust loop engineering.
+- Clarify CLI and AgentSession SDK support, and the adapter requirement for direct core-loop integrations.
+
 ## [0.1.0] - 2026-10-04
 
 ### Added

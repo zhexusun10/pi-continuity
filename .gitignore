@@ -6,3 +6,5 @@ coverage/
 !.env.example
 .pi/
 *.tsbuildinfo
+.venv-assets/
+__pycache__/

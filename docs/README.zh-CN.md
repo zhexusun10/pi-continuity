@@ -1,10 +1,28 @@
 # pi-continuity
 
-**一轮输出被截断，不应该意味着整个任务就此结束。**
+**为 Pi 提供更健壮的 loop engineering。**
 
-这是一个 Pi extension：补齐 Output Truncation 续跑、加强 provider stream recovery，并在任务真正停止于 tool call、没有最终文字回复时追加 Continue。
+一轮输出结束，不等于任务完成。这个 extension 在截断和流错误后保留进展，并区分“工具调用完成”和“整个任务完成”，把恢复与停止变成明确的运行时策略。
 
-[English](../README.md) · [设计](design.md) · [论文与源码依据](evidence.md)
+[English](../README.md) · [研究依据](evidence.md) · [循环设计](design.md) · [源码](../extensions/index.ts)
+
+## 为什么是 loop engineering？
+
+[Finding the Right Fit: Model–Harness Interactions across Agent Tasks，§5.1](https://arxiv.org/html/2610.00917#S5.SS1) 指出，**harness 如何返回失败、恢复中断和决定停止**，会影响 model–harness 的配合：
+
+- openJiuwen 在输出上限后保留 partial reasoning 并重新提示继续，恢复了 **100 个 run，其中 48 个后来获得非零 reward**。
+- 在人工检查的 **6 个 matched pair 中，2 个的恢复机制是决定性因素**。
+- 论文还将 provider stream 失败归于 harness resilience，而不是简单归为模型能力不足。
+
+这是论文中的观测，**不是本扩展的实测成绩，也不是普适成功率保证**。它给出的设计依据是：不要把可恢复的轮次结束，过早当作任务结束。
+
+pi-continuity 将这个依据落实为：**保留可用状态 → 原生恢复优先 → 按策略继续未完成任务 → 在合适的边界停止**。Continue 只是发给模型的指令；loop engineering 在于决定**什么时候继续、保留什么上下文、什么时候必须停止**。取消、审批、人工阻塞和恢复预算仍然有效。
+
+Pi 已有截断工具保护，以及对部分 length stop 的 compact-and-retry；本扩展补齐仍然存在的退出路径，包括达到期望输出上限的纯文字/思考截断。详见[论文与版本固定的源码分析](evidence.md)。
+
+![循环机制示意：区分轮次中断与任务完成，保留可读进展，并在策略约束内继续](https://raw.githubusercontent.com/zhexusun10/pi-continuity/main/assets/loop-engineering.png)
+
+*机制示意图，不是任务成功率测试。*
 
 ## 安装
 
@@ -12,7 +30,13 @@
 pi install git:github.com/zhexusun10/pi-continuity
 ```
 
-重新启动 Pi，或 `/reload`。需要具有可操作边界事件的 **Pi 1.0.1+**，以及 Node.js 22.19+。已经使用 Pi 1.0.1 SDK 测试；不支持旧版本或没有 extension 系统的裸 `pi-agent-core` 循环。不修改 Pi 内核，无需构建。
+重新启动 Pi，或 `/reload`。需要具有可操作边界事件的 **Pi 1.0.1+**，以及 Node.js 22.19+。这是 **coding-agent 层的扩展**：Pi CLI 和使用 `AgentSession`、正确加载并绑定扩展的 SDK 程序都可以使用。不修改 Pi 内核，无需构建。
+
+## 看恢复策略
+
+![机制动画：截断后续跑、原生重试优先的流恢复，以及工具结果之后再追加 Continue](https://raw.githubusercontent.com/zhexusun10/pi-continuity/main/assets/demo.gif)
+
+*这是绘制的机制 storyboard，不是 Pi TUI 录屏，也不是真实模型实验。流恢复先让原生重试完成；工具尾部续跑发生在结果之后，不重复执行已完成的工具。* [MP4](https://raw.githubusercontent.com/zhexusun10/pi-continuity/main/assets/demo.mp4) · [渲染源码与来源说明](assets.md)。
 
 ## 三项功能
 
@@ -63,17 +87,21 @@ pi --continuity-tool-tail=false
 
 **续跑会增加 token 和时间成本；unlimited 可能无限循环。** Continue 不能证明任务完成，自动化运行仍需要独立校验和 harness 层时间/token 预算。遇到必须由人处理的阻塞，提示会要求模型用文字说明并停止，不绕过审批。
 
-## 依据
-
-[Finding the Right Fit: Model–Harness Interactions across Agent Tasks，§5.1](https://arxiv.org/html/2610.00917#S5.SS1) 记录：openJiuwen 在输出上限后恢复了 **100 个 run，其中 48 个后来获得非零 reward**；人工检查的 **6 个 matched pair 中，2 个的恢复机制是决定性因素**。论文还将 provider stream 失败归于 harness resilience。
-
-这些是论文的观测，**不是本扩展的 benchmark 成绩，也不是 Continue 的普适因果收益**。
-
-当前 Pi 已补了截断工具调用的合成错误反馈，而且在输出量低于模型期望上限时，有一次 compact-and-retry。不能笼统说所有纯文字截断都必然直接退出；达到期望输出上限的纯文字/思考截断仍存在退出路径。本扩展覆盖这个缺口。详见[版本固定的源码分析](evidence.md)。
-
 ## Harness 与边界
 
-必须把扩展加载进实际评测使用的同一个 `AgentSession`。SDK 应先调用 `session.bindExtensions(...)` 初始化扩展生命周期；等待 `session.prompt()` 完整结束，或等待 `agent_settled`，不能把第一个 `agent_end` 当作任务彻底结束。
+### CLI、SDK 与 agent-core 到底有什么区别？
+
+| 使用方式 | 集成方式 |
+| --- | --- |
+| **Pi CLI：TUI / RPC / JSON / print** | 正常安装，coding-agent 运行时负责加载扩展。 |
+| **coding-agent SDK：`AgentSession`** | 通过 resource loader 加载扩展，并调用 `session.bindExtensions(...)`；这与 CLI 使用的是同一层 session 机制。 |
+| **直接使用 `pi-agent-core` 的 `Agent` / `agentLoop()`** | 这些是底层构件，不是 extension host；不会自动加载本包，也没有本扩展使用的完整 session 边界契约，需要额外适配。 |
+
+原先“bare pi-agent-core loops are not supported”的意思是**不能把这个 extension 直接插入未经过 coding-agent session 封装的底层循环**，不是说 agent-core 无法恢复，更不是 SDK 不支持。`AgentSession` 本身就建立在 agent-core 之上。
+
+本包依赖的是 `ExtensionAPI`、session 上下文投影、可持久化的 boundary drafts，以及 `agent_before_settle`。底层循环也可以用自己的 hooks 实现恢复策略，但本仓库没有提供那层适配器。[分层说明](design.md#integration-layers)。
+
+必须把扩展加载进实际评测使用的同一个 `AgentSession`；等待 `session.prompt()` 完整结束，或等待 `agent_settled`，不能把第一个 `agent_end` 当作任务彻底结束。
 
 扩展不改变评分规则；成功恢复后最终 assistant 可以不再是 `length`，但不保证任务获得 reward。它也救不了提前在中间错误/第一个 `agent_end` 退出的外部 harness。
 
@@ -101,6 +129,8 @@ npm pack --dry-run
 pi -e .
 ```
 
-测试使用真实 Pi `AgentSession` 和内存 faux provider，不需要 API key，不消耗付费模型 token。包含裸 Pi 截断失败对照、不同截断形态、原生重试顺序、上限、取消、排队输入和早先脱敏保护。安装验证使用隔离配置与 offline RPC。
+现有测试使用真实 Pi `AgentSession` 和内存 faux provider，不需要 API key，不消耗付费模型 token。包含未加载本扩展的 Pi 对照、不同截断形态、原生重试顺序、上限、取消、排队输入和早先脱敏保护。安装验证使用隔离配置与 offline RPC。
+
+图片与动画独立于运行时测试；[渲染说明](assets.md)提供 PNG/GIF/MP4 的生成方法，不启动 Pi、不调用模型。
 
 MIT；独立社区扩展，并非 Pi 官方产品。

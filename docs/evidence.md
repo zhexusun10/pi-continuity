@@ -1,4 +1,6 @@
-# Evidence and scope
+# Research basis: loop engineering
+
+The design premise is that a response boundary need not be a task boundary. Preserving unfinished state, returning usable failure feedback, and deciding whether to resume or settle are harness engineering choices. The paper below supplies empirical design motivation; it is not a proof of this extension's implementation or a promised reward improvement.
 
 ## Paper observations
 
@@ -58,7 +60,11 @@ A tool batch can terminate the loop's normal follow-up. If the final substantive
 
 An extension loaded into that session can change which assistant is final by actually making another request. It does not change this check or determine the reward. The outcome of a thrown exception depends on the surrounding evaluator; the guard itself does not assign a score.
 
-## What has been validated here?
+## Illustration provenance
+
+The README's PNG and animated GIF/MP4 are **mechanism storyboards**, illustrating the documented loop policy. They are not captured executions, new tests, live TUI recordings, or model-quality measurements. They do not plot the paper's 48/100 observation as this extension's success rate. [Rendering source and reproduction](assets.md).
+
+## Existing implementation validation
 
 - Deterministic unit tests for detection, budgets, quoted partial preservation, and cancellation/backoff.
 - Integration tests using the **published Pi 1.0.1 SDK**, a real `AgentSession`, and Pi's in-memory faux provider. No real model APIs or credentials are used.

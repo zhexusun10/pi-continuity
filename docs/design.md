@@ -1,4 +1,10 @@
-# Recovery design
+# Loop engineering design
+
+## Research basis
+
+[Finding the Right Fit: Model–Harness Interactions across Agent Tasks, §5.1](https://arxiv.org/html/2610.00917#S5.SS1) motivates making recovery and termination explicit harness policies: openJiuwen resumes interrupted output with partial reasoning retained, and the inspected matched pairs identify resumption as consequential. [Evidence and scope](evidence.md) separates these paper observations from implementation validation.
+
+Here, **loop engineering** means controlling the transition from a completed response to the next request or task settlement. Continue is an instruction; the loop policy decides when it is warranted, what state survives, how native recovery and queues compose, and which limits end the run. It is not an unconditional "keep going" prompt.
 
 ## Problem → trace → solution
 
@@ -14,6 +20,26 @@ user task
 ```
 
 Adding only `continue: true` after a plain assistant is insufficient: Pi requires runnable user/tool-result context. The hidden custom message supplies user-role context. Returning boundary drafts and a continuation decision makes the change synchronous and persistent; it avoids fire-and-forget `sendUserMessage()` races at `agent_end` and works in TUI, RPC, JSON, and print modes.
+
+## Integration layers
+
+```text
+Pi CLI / coding-agent SDK application
+  -> AgentSession: extension loading, session projection, recovery, settlement
+     -> pi-agent-core Agent / agentLoop: model turns and tool execution
+```
+
+pi-continuity is installed at the **AgentSession extension layer**, not by replacing the core loop. Both the CLI and SDK can use it. SDK users must load its factory through the resource loader and initialize bindings with `session.bindExtensions(...)`.
+
+A program that imports only `Agent` or `agentLoop()` from `pi-agent-core` has not created this extension host. In particular:
+
+- Core `turn_end` is a notification carrying a message and tool results; the coding-agent extension boundary also provides projected context, persisted entry IDs, draft entries, and a continuation decision.
+- `agent_before_settle` runs after session-level native retries, compaction, and queues; it is not a core Agent event.
+- Append-only `context_edit` / `custom_message` drafts belong to the session layer, not the standalone core loop.
+
+Core hooks such as `finishTurn` and `prepareNextTurn` can support custom loop policies, but are not a drop-in replacement for those contracts. Error/aborted core turns also remain hard exits and need outer recovery orchestration. This package does not expose a standalone core adapter. That is the precise integration requirement previously described too broadly as "bare pi-agent-core loops are not supported"—not an inability of agent-core to support recovery.
+
+See the version-pinned [core hooks](https://github.com/earendil-works/pi/blob/76dfb88f63ce51ff2e3fe2ead4fcf1f65f71f121/packages/agent/src/types.ts#L256-L281) and [extension boundaries](https://github.com/earendil-works/pi/blob/76dfb88f63ce51ff2e3fe2ead4fcf1f65f71f121/packages/coding-agent/src/core/extensions/types.ts#L958-L1035).
 
 ## Event policy
 
@@ -60,7 +86,7 @@ Authentication, permission, account limits, billing, safety errors, explicit abo
 - Provider-hidden encrypted reasoning, exact decoding continuation, or content absent from the finalized response.
 - Arbitrary nested model calls, cache warming, or summarization streams. This hooks the main agent's turns.
 - Guarantees that a model will obey Continue, preserve correctness, avoid repeats, or improve reward.
-- A harness running only the low-level Agent, omitting extension bindings, or treating the first `agent_end` as final.
+- Missing integration contracts: a direct core loop without an extension adapter, an AgentSession whose extensions are not loaded/bound, or a harness treating the first `agent_end` as final. See [integration layers](#integration-layers).
 
 ## Reproducible tests
 

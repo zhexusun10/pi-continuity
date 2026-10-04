@@ -1,14 +1,30 @@
 # pi-continuity
 
-**A cut-off turn should not be the end of the task.**
+**More robust loop engineering for Pi.**
 
-Continue Pi after output truncation, recover broken provider streams, and request a final text response when a run ends on tool calls.
+A turn ending is not necessarily a task finishing. Preserve progress across output truncation, recover broken streams, and distinguish a completed tool call from a completed task.
 
 [![CI](https://github.com/zhexusun10/pi-continuity/actions/workflows/ci.yml/badge.svg)](https://github.com/zhexusun10/pi-continuity/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Pi 1.0.1](https://img.shields.io/badge/tested-Pi%201.0.1-blue.svg)](https://pi.dev)
 
-[简体中文](docs/README.zh-CN.md) · [Design](docs/design.md) · [Evidence](docs/evidence.md) · [Source](extensions/index.ts)
+[简体中文](docs/README.zh-CN.md) · [Research basis](docs/evidence.md) · [Loop design](docs/design.md) · [Source](extensions/index.ts)
+
+## Why loop engineering?
+
+[Finding the Right Fit: Model–Harness Interactions across Agent Tasks, §5.1](https://arxiv.org/html/2610.00917#S5.SS1) identifies **harness recovery and termination policy** as consequential parts of model–harness fit:
+
+> openJiuwen re-prompts the model to continue with its partial reasoning kept (100 runs resumed, 48 of which went on to score above zero).
+
+Resumption was decisive in **2 of 6** inspected matched pairs; the paper also attributes provider-stream failures to harness resilience rather than model behavior. These are the paper's observations, **not this extension's benchmark results** or a universal success-rate claim.
+
+pi-continuity applies that design lesson to Pi's loop: **preserve usable state → allow native recovery → continue unfinished work within policy → settle only when appropriate**. Continue is the model-facing instruction; the engineering is deciding **when** to send it, **which context** is safe to retain, and **when to stop**. Cancellation, approvals, human-required blockers, and recovery budgets still matter.
+
+Pi already protects truncated tool arguments and can compact-and-retry some length stops. This extension addresses the remaining exit paths, including text/reasoning truncation at the desired output cap. [Paper and version-pinned source analysis](docs/evidence.md).
+
+![Loop engineering: distinguish an interrupted turn from task completion, preserve readable context, and resume within policy](https://raw.githubusercontent.com/zhexusun10/pi-continuity/main/assets/loop-engineering.png)
+
+*Mechanism illustration, not a task-success benchmark.*
 
 ## Install
 
@@ -18,7 +34,13 @@ pi install git:github.com/zhexusun10/pi-continuity
 
 Start a new Pi process or run `/reload`. No core patches, build step, or runtime dependency installation. This repository is npm-package-ready, but the documented installation uses GitHub; it does not assume an npm release exists.
 
-Requires **Pi 1.0.1+ with actionable boundary hooks**, and Node.js 22.19+. Tested against the Pi 1.0.1 SDK. Older Pi versions and bare `pi-agent-core` loops are not supported.
+Requires **Pi 1.0.1+ with actionable boundary hooks**, and Node.js 22.19+. This is a **coding-agent extension**: it works in the Pi CLI and SDK applications using `AgentSession` with extensions loaded and bound. [CLI / SDK integration boundary](#cli--sdk-integration).
+
+## See the recovery policy
+
+![Animated mechanism storyboard: output-cap continuation, native-first stream recovery, and tool results before Continue](https://raw.githubusercontent.com/zhexusun10/pi-continuity/main/assets/demo.gif)
+
+*An illustrated mechanism storyboard—not a recorded Pi TUI session or a real-model experiment. Stream fallback is shown only after native recovery is exhausted; tool-tail continuation comes after the result, without re-running the tool.* [MP4](https://raw.githubusercontent.com/zhexusun10/pi-continuity/main/assets/demo.mp4) · [Rendering source and provenance](docs/assets.md).
 
 ## What changes?
 
@@ -70,15 +92,19 @@ Budgets reset on an actual new user request, not on every `agent_start` emitted 
 
 **Recovery costs additional tokens and time.** Unlimited continuation can loop indefinitely. A Continue is a chance to finish, not proof of task completion. Use independent verification and harness-level time/token budgets for unattended work. The prompt asks the model to explain human-required blockers in text and stop; it does not bypass approval gates.
 
-## Why?
-
-[Finding the Right Fit: Model–Harness Interactions across Agent Tasks, §5.1](https://arxiv.org/html/2610.00917#S5.SS1) reports **100 openJiuwen runs resumed after output caps; 48 later scored above zero**, with resumption decisive in **2 of 6** inspected matched pairs. It also attributes provider-stream failures to harness resilience.
-
-Those are the paper's observations, **not pi-continuity benchmark results** or a causal estimate of a generic Continue prompt's benefit. Pi has since added truncated-tool handling and conditional compact-and-retry. The remaining gap includes text/reasoning truncation at the desired output cap. See [the paper and version-pinned source analysis](docs/evidence.md).
-
 ## Harness integration and limits
 
-Load this package into the **same `AgentSession` used by the harness**. Await `session.prompt()` through final settlement, or use `agent_settled`; `agent_end` can precede native/fallback recovery. SDK applications must initialize extension bindings (`session.bindExtensions(...)`) so lifecycle configuration runs.
+### CLI / SDK integration
+
+| Integration | How the extension participates |
+| --- | --- |
+| **Pi CLI: TUI, RPC, JSON, print** | Install the package normally; the coding-agent runtime loads its extension hooks. |
+| **coding-agent SDK: `AgentSession`** | Load the extension through the resource loader and call `session.bindExtensions(...)`. This is the same session layer the CLI uses. |
+| **Direct `pi-agent-core` `Agent` / `agentLoop()`** | These are lower-level building blocks, not an extension host. They do not load this package or provide the session-boundary contract it uses. An integration adapter would be needed. |
+
+This is **not** a claim that `pi-agent-core` cannot recover or that the SDK is incompatible. `AgentSession` itself builds on agent-core. The distinction is the host layer: this package consumes `ExtensionAPI`, projected session entries, boundary drafts, and `agent_before_settle`. A direct core loop can implement its own recovery using core hooks, but this repository does not provide that adapter. [Layer-by-layer explanation](docs/design.md#integration-layers).
+
+Load this package into the **same `AgentSession` used by the harness**. Await `session.prompt()` through final settlement, or use `agent_settled`; `agent_end` can precede native/fallback recovery.
 
 A successful resumed response can replace the final `length` stop seen by a harness. The extension does not change reward logic, deadlines, or exception handling, and cannot rescue a harness that exits on the first `agent_end` or intermediate error.
 
@@ -112,7 +138,7 @@ Tests use Pi's real `AgentSession` and in-memory faux provider: **no API keys, p
 node scripts/verify-install.mjs git:github.com/zhexusun10/pi-continuity
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) and [release checklist](docs/releasing.md).
+The illustrations are maintained separately from runtime tests. To regenerate PNG/GIF/MP4, see [asset tooling](docs/assets.md); rendering does not run Pi or call a model. See [CONTRIBUTING.md](CONTRIBUTING.md) and [release checklist](docs/releasing.md).
 
 ## License
 

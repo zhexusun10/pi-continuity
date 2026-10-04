@@ -16,4 +16,6 @@ Every recovery change needs regression coverage for normal final text, cancellat
 
 Report real model measurements separately from deterministic control-flow tests. Include versions, provider/model, tools, prompts, all retry/compaction/time/token budgets, baseline, repetitions, and failure accounting. Do not infer reward improvements from the paper's matched pairs or synthetic recovery tests.
 
+For documentation media, use [the illustration renderer](docs/assets.md). Do not turn storyboard paths into claimed benchmark results or present them as live session recordings. Rendering does not require running tests or models.
+
 When reporting a bug, remove private prompts, sensitive reasoning, tool arguments, paths, and credentials from session excerpts. Include final stopReason/errorMessage and whether the harness waits for agent_settled.
