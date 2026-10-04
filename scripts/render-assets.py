@@ -105,9 +105,7 @@ def hero():
         text(draw, (left + 23, 634), title, 23, kind="bold")
         text(draw, (left + 23, 677), line1, 18, MUTED)
         text(draw, (left + 23, 707), line2, 18, MUTED)
-    draw.line((56, 770, 1224, 770), fill=BORDER, width=1)
-    text(draw, (56, 787), "Mechanism illustration. Not a task-success benchmark.", 18, MUTED, "mono")
-    return image
+    return image.crop((0, 0, W, 780))
 
 
 # Hand-authored design paths, not captured execution logs or new experiments.

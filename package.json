@@ -15,7 +15,7 @@
   "files": ["extensions/", "lib/", "README.md", "docs/README.zh-CN.md", "docs/design.md", "docs/evidence.md", "docs/assets.md", "LICENSE", "CHANGELOG.md"],
   "pi": {
     "extensions": ["./extensions/index.ts"],
-    "image": "https://raw.githubusercontent.com/zhexusun10/pi-continuity/main/assets/loop-engineering.png",
+    "image": "https://raw.githubusercontent.com/zhexusun10/pi-continuity/main/assets/loop-engineering.png?v=2",
     "video": "https://raw.githubusercontent.com/zhexusun10/pi-continuity/main/assets/demo.mp4"
   },
   "engines": { "node": ">=22.19.0" },

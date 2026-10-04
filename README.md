@@ -22,9 +22,7 @@ pi-continuity applies that design lesson to Pi's loop: **preserve usable state â
 
 Pi already protects truncated tool arguments and can compact-and-retry some length stops. This extension addresses the remaining exit paths, including text/reasoning truncation at the desired output cap. [Paper and version-pinned source analysis](docs/evidence.md).
 
-![Loop engineering: distinguish an interrupted turn from task completion, preserve readable context, and resume within policy](https://raw.githubusercontent.com/zhexusun10/pi-continuity/main/assets/loop-engineering.png)
-
-*Mechanism illustration, not a task-success benchmark.*
+![Loop engineering: distinguish an interrupted turn from task completion, preserve readable context, and resume within policy](https://raw.githubusercontent.com/zhexusun10/pi-continuity/main/assets/loop-engineering.png?v=2)
 
 ## Install
 

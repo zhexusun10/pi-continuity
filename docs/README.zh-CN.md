@@ -20,9 +20,7 @@ pi-continuity 将这个依据落实为：**保留可用状态 → 原生恢复�
 
 Pi 已有截断工具保护，以及对部分 length stop 的 compact-and-retry；本扩展补齐仍然存在的退出路径，包括达到期望输出上限的纯文字/思考截断。详见[论文与版本固定的源码分析](evidence.md)。
 
-![循环机制示意：区分轮次中断与任务完成，保留可读进展，并在策略约束内继续](https://raw.githubusercontent.com/zhexusun10/pi-continuity/main/assets/loop-engineering.png)
-
-*机制示意图，不是任务成功率测试。*
+![循环机制示意：区分轮次中断与任务完成，保留可读进展，并在策略约束内继续](https://raw.githubusercontent.com/zhexusun10/pi-continuity/main/assets/loop-engineering.png?v=2)
 
 ## 安装
 
