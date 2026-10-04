@@ -1,0 +1,24 @@
+name: Bug report
+description: Report a continuation, stream recovery, or installation problem.
+body:
+  - type: input
+    id: pi-version
+    attributes:
+      label: Pi and extension versions
+      description: Include pi --version, pi-continuity version, installation source, and Node/OS versions.
+    validations:
+      required: true
+  - type: input
+    id: provider
+    attributes:
+      label: Provider / model / run mode
+      description: Include thinking level, TUI/RPC/print/SDK mode, and whether native retries/compaction are enabled.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction and expected behavior
+      description: Include minimal input, continuation flags, final stopReason/errorMessage, and whether agent_settled fired. Remove API keys, private prompts, tool arguments, and sensitive reasoning.
+    validations:
+      required: true

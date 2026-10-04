@@ -1,0 +1,36 @@
+{
+  "name": "pi-continuity",
+  "version": "0.1.0",
+  "description": "Keep Pi working after output truncation, broken streams, and tool-call-only endings.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Jerry (zhexusun10)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zhexusun10/pi-continuity.git"
+  },
+  "bugs": { "url": "https://github.com/zhexusun10/pi-continuity/issues" },
+  "homepage": "https://github.com/zhexusun10/pi-continuity#readme",
+  "keywords": ["pi-package", "pi", "pi-agent", "pi-extension", "coding-agent", "recovery", "output-truncation"],
+  "files": ["extensions/", "lib/", "README.md", "docs/README.zh-CN.md", "docs/design.md", "docs/evidence.md", "LICENSE", "CHANGELOG.md"],
+  "pi": { "extensions": ["./extensions/index.ts"] },
+  "engines": { "node": ">=22.19.0" },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.0.1",
+    "@earendil-works/pi-ai": "1.0.1",
+    "@earendil-works/pi-agent-core": "1.0.1",
+    "@types/node": "22.19.19",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3"
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts",
+    "verify:load": "node scripts/verify-install.mjs",
+    "prepublishOnly": "npm run check && npm test"
+  }
+}
