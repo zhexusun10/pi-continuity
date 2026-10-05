@@ -16,25 +16,25 @@ The paper's conclusion also distinguishes a genuinely unfinished step from a hum
 
 ## Pi source inspected
 
-Local `packages/coding-agent/package.json` reports **1.0.1**. Source checkout:
+Local `packages/coding-agent/package.json` reports **1.0.3**. Source checkout:
 
 ```text
-76dfb88f63ce51ff2e3fe2ead4fcf1f65f71f121
+04b97ef0007ad2d55615d0a545163387a701fc67
 ```
 
 All source links below are pinned to that revision, not moving `main`.
 
 ### 1. Truncated tools are already protected
 
-[`packages/agent/src/agent-loop.ts`](https://github.com/earendil-works/pi/blob/76dfb88f63ce51ff2e3fe2ead4fcf1f65f71f121/packages/agent/src/agent-loop.ts#L258-L282) rejects tool calls from a `length` response with synthetic errors instead of executing potentially incomplete arguments. The tool batch then naturally continues. This is the fix identified as commit `351efc828` / PR [#6285](https://github.com/earendil-works/pi/pull/6285).
+[`packages/agent/src/agent-loop.ts`](https://github.com/earendil-works/pi/blob/04b97ef0007ad2d55615d0a545163387a701fc67/packages/agent/src/agent-loop.ts#L258-L282) rejects tool calls from a `length` response with synthetic errors instead of executing potentially incomplete arguments. The tool batch then naturally continues. This is the fix identified as commit `351efc828` / PR [#6285](https://github.com/earendil-works/pi/pull/6285).
 
 pi-continuity relies on this core safety behavior, never executes tools itself, and keeps the unexecuted-call explanation in an optional sanitized checkpoint before requesting the next boundary turn.
 
 ### 2. Pure text/reasoning length stops still have an exit path
 
-The same loop sets `hasMoreToolCalls = false` when there are no tool calls. With no steering/follow-up message and no explicit finish-turn continuation decision, it exits and emits `agent_end` ([loop decision](https://github.com/earendil-works/pi/blob/76dfb88f63ce51ff2e3fe2ead4fcf1f65f71f121/packages/agent/src/agent-loop.ts#L285-L320)).
+The same loop sets `hasMoreToolCalls = false` when there are no tool calls. With no steering/follow-up message and no explicit finish-turn continuation decision, it exits and emits `agent_end` ([loop decision](https://github.com/earendil-works/pi/blob/04b97ef0007ad2d55615d0a545163387a701fc67/packages/agent/src/agent-loop.ts#L285-L320)).
 
-**Important correction:** that is not the whole `AgentSession` behavior. The session's [`_checkCompaction()`](https://github.com/earendil-works/pi/blob/76dfb88f63ce51ff2e3fe2ead4fcf1f65f71f121/packages/coding-agent/src/core/agent-session.ts#L2934-L2999) can already compact and retry a length stop once. [`isRecoverableLength()`](https://github.com/earendil-works/pi/blob/76dfb88f63ce51ff2e3fe2ead4fcf1f65f71f121/packages/ai/src/utils/overflow.ts#L180-L189) checks:
+**Important correction:** that is not the whole `AgentSession` behavior. The session's [`_checkCompaction()`](https://github.com/earendil-works/pi/blob/04b97ef0007ad2d55615d0a545163387a701fc67/packages/coding-agent/src/core/agent-session.ts#L2917-L2999) can compact and retry a length stop once. [`isRecoverableLength()`](https://github.com/earendil-works/pi/blob/04b97ef0007ad2d55615d0a545163387a701fc67/packages/ai/src/utils/overflow.ts#L174-L184) checks:
 
 ```typescript
 message.stopReason === "length" && desiredMaxOutput > 0 && message.usage.output < desiredMaxOutput
@@ -46,7 +46,9 @@ Our integration tests reproduce the at-cap baseline with compaction enabled, the
 
 ### 3. Native retries exist, but discard failed assistant context
 
-[`_handlePostAgentRun()`](https://github.com/earendil-works/pi/blob/76dfb88f63ce51ff2e3fe2ead4fcf1f65f71f121/packages/coding-agent/src/core/agent-session.ts#L1807-L1843) performs native transient retries, compaction, and queued-message handling before the final boundary. [`_prepareRetry()`](https://github.com/earendil-works/pi/blob/76dfb88f63ce51ff2e3fe2ead4fcf1f65f71f121/packages/coding-agent/src/core/agent-session.ts#L3713-L3752) durably omits the failed assistant from model projection and waits with backoff. Provider [`transformMessages()`](https://github.com/earendil-works/pi/blob/76dfb88f63ce51ff2e3fe2ead4fcf1f65f71f121/packages/ai/src/api/transform-messages.ts#L195-L203) also skips errored/aborted assistants because incomplete reasoning/tool structures can be invalid to replay.
+[`_handlePostAgentRun()`](https://github.com/earendil-works/pi/blob/04b97ef0007ad2d55615d0a545163387a701fc67/packages/coding-agent/src/core/agent-session.ts#L1807-L1843) performs native transient retries, compaction, and queued-message handling before the final boundary. [`_prepareRetry()`](https://github.com/earendil-works/pi/blob/04b97ef0007ad2d55615d0a545163387a701fc67/packages/coding-agent/src/core/agent-session.ts#L3713-L3752) durably omits the failed assistant from model projection and waits with backoff. Provider [`transformMessages()`](https://github.com/earendil-works/pi/blob/04b97ef0007ad2d55615d0a545163387a701fc67/packages/ai/src/api/transform-messages.ts#L195-L203) also skips errored/aborted assistants because incomplete reasoning/tool structures can be invalid to replay.
+
+The public [`isRetryableAssistantError()` classifier](https://github.com/earendil-works/pi/blob/04b97ef0007ad2d55615d0a545163387a701fc67/packages/ai/src/utils/retry.ts) explicitly recognizes `terminated`. A finalized `stopReason: "error"` with that message follows native-first recovery; `stopReason: "aborted"` and explicit cancellation remain terminal.
 
 This extension saves readable fragments as safe quoted text before native retry omission, reuses the native classifier with additional premature-stream patterns, and schedules fallback only at `agent_before_settle`. It does not replace native retry settings or pretend there was no failed response.
 
@@ -56,7 +58,7 @@ A tool batch can terminate the loop's normal follow-up. If the final substantive
 
 ### 5. Evals reject a final length stop
 
-[`packages/evals/src/harness.ts`, `promptAgent()`](https://github.com/earendil-works/pi/blob/76dfb88f63ce51ff2e3fe2ead4fcf1f65f71f121/packages/evals/src/harness.ts#L238-L254) awaits `session.prompt()`, then rejects a final stop reason other than `stop` or `toolUse`. A final `length` throws. It also rejects an empty final `stop` response.
+[`packages/evals/src/harness.ts`, `promptAgent()`](https://github.com/earendil-works/pi/blob/04b97ef0007ad2d55615d0a545163387a701fc67/packages/evals/src/harness.ts#L238-L254) awaits `session.prompt()`, then rejects a final stop reason other than `stop` or `toolUse`. A final `length` throws. It also rejects an empty final `stop` response.
 
 An extension loaded into that session can change which assistant is final by actually making another request. It does not change this check or determine the reward. The outcome of a thrown exception depends on the surrounding evaluator; the guard itself does not assign a score.
 
@@ -67,7 +69,8 @@ The README's PNG and animated GIF/MP4 are **mechanism storyboards**, illustratin
 ## Existing implementation validation
 
 - Deterministic unit tests for detection, budgets, quoted partial preservation, and cancellation/backoff.
-- Integration tests using the **published Pi 1.0.1 SDK**, a real `AgentSession`, and Pi's in-memory faux provider. No real model APIs or credentials are used.
+- Integration tests use the **published Pi 1.0.3 SDK**, a real `AgentSession`, and Pi's in-memory faux provider. No real model APIs or credentials are used.
+- Explicit `terminated` / `TypeError: terminated` fixtures in `tests/terminated.test.ts` cover empty/partial responses, native-first retry, exhausted-native fallback, protocol safety, budgets, cancellation, and queued steering input.
 - Isolated offline RPC installation/command-load verification.
 
 These validate the extension's control flow and package loading. The paper's Terminal-Bench 4.0 results provide the benchmark evidence for the underlying recovery problem; a separate real-model comparison would measure this package's task outcomes.

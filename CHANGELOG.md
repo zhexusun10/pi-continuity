@@ -6,9 +6,11 @@
 
 - PNG and GIF/MP4 mechanism illustrations with reproducible rendering source and explicit provenance; no new model experiments.
 - Gallery image/video metadata.
+- Explicit `terminated` / `TypeError: terminated` regression coverage for native retry, bounded fallback, safe partial context, cancellation, and queued steering input.
 
 ### Changed
 
+- Validate compatibility against Pi 1.0.3 and pin the AgentSession, pi-ai, and agent-core development peers to 1.0.3. Pi's native below-limit length recovery remains distinct from the extension's bounded continuation for hard output-cap stops; raw stop reasons and usage are not rewritten.
 - Lead English/Chinese documentation with the paper-based case for robust loop engineering.
 - Clarify CLI and AgentSession SDK support, and the adapter requirement for direct core-loop integrations.
 - Merge same-request readable partial checkpoints into one bounded active context and omit stale recovery artifacts from later requests without rewriting raw history.

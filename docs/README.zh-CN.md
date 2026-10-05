@@ -31,7 +31,7 @@ pi install git:github.com/zhexusun10/pi-continuity
 | Pi 原本准备停止的情况 | pi-continuity 的处理 |
 | --- | --- |
 | `stopReason: "length"`：文字、纯思考、空输出、混合内容或工具调用 | 从下一次模型投影中移除不完整 assistant 协议；有可读进展时保存有界 partial，并在 `turn_end` 请求下一轮模型请求。 |
-| provider stream 失败 | 先让 Pi 原生 session retry 处理；原生恢复耗尽后，移除失败 assistant，必要时保存有界 checkpoint，再按分段等待策略请求下一轮。 |
+| provider stream 失败，包括 `errorMessage: "terminated"` / `"TypeError: terminated"` | 先让 Pi 原生 session retry 处理；原生恢复耗尽后，移除失败 assistant，必要时保存有界 checkpoint，再按分段等待策略请求下一轮。 |
 | 成功但为空的 assistant 输出 | 移除空 assistant，并使用 stream recovery 预算请求下一轮。 |
 | 工具结果已经完成但任务停在 tool call | 保留已完成的 tool result，在 `agent_before_settle` 请求下一轮；不添加合成 user 指令，也不重复执行工具。 |
 

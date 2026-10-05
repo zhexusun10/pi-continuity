@@ -36,7 +36,7 @@ Requires **Pi 1.0.1+ with actionable session boundaries** and Node.js 22.19+. It
 | When Pi would stop | pi-continuity |
 | --- | --- |
 | `stopReason: "length"`: text, reasoning-only, empty, mixed, or tool-call output | Removes the interrupted assistant protocol from the next model projection, preserves bounded readable partial context when useful, and requests one next model turn at `turn_end`. |
-| A failed provider stream | Lets Pi's native session retry run first. After native recovery is exhausted, omits the failed assistant, preserves a bounded checkpoint when useful, and requests another model turn with staged delays. |
+| A failed provider stream, including `errorMessage: "terminated"` or `"TypeError: terminated"` | Lets Pi's native session retry run first. After native recovery is exhausted, omits the failed assistant, preserves a bounded checkpoint when useful, and requests another model turn with staged delays. |
 | Successful but empty output | Omits the empty assistant response and requests another model turn using the bounded stream-recovery budget. |
 | A run that ends with a tool call after the tool result | Keeps the completed tool result and requests one next model turn at `agent_before_settle`; it does not add a synthetic user instruction or rerun the tool. |
 

@@ -32,9 +32,9 @@
     "@earendil-works/pi-ai": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "1.0.1",
-    "@earendil-works/pi-ai": "1.0.1",
-    "@earendil-works/pi-agent-core": "1.0.1",
+    "@earendil-works/pi-coding-agent": "1.0.3",
+    "@earendil-works/pi-ai": "1.0.3",
+    "@earendil-works/pi-agent-core": "1.0.3",
     "@types/node": "22.19.19",
     "tsx": "4.23.15",
     "typescript": "5.9.3"

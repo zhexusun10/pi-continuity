@@ -17,6 +17,7 @@ for (const error of [
   "network connection lost", "ECONNRESET", "Unexpected EOF", "Incomplete chunked response",
   "Provider finish_reason: network_error", "Premature close", "stream interrupted", "UND_ERR_SOCKET",
   "ENOTFOUND api.example.com", "503 service unavailable", "429 rate limit exceeded",
+  "terminated", "Error: terminated", "TypeError: terminated",
 ]) {
   test(`transient classifier: ${error}`, () => {
     assert.equal(recoveryReason(fauxAssistantMessage("", { stopReason: "error", errorMessage: error })), "stream-error");
@@ -29,6 +30,8 @@ for (const error of [
   "context_length_exceeded; please retry your request", "prompt is too long",
   "content_filter", "400 invalid request; stream closed", "Unknown deterministic failure",
   "subscription_sharing_usage_limit_exceeded", "model not found", "invalid max_tokens value",
+  "401 authentication failed; stream terminated", "429 insufficient_quota; stream terminated",
+  "context_length_exceeded; stream terminated", "content_filter; stream terminated",
 ]) {
   test(`terminal classifier: ${error}`, () => {
     assert.equal(recoveryReason(fauxAssistantMessage("", { stopReason: "error", errorMessage: error })), undefined);
@@ -44,7 +47,9 @@ test("explicit output-cap errors are not mistaken for input-context overflow", (
 
 test("aborted, pending, and deferred responses never resume", () => {
   for (const stopReason of ["aborted", "pending", "deferred"] as const) {
-    assert.equal(recoveryReason(fauxAssistantMessage(fauxToolCall("finish", {}), { stopReason, errorMessage: "stream interrupted" })), undefined);
+    for (const errorMessage of ["stream interrupted", "terminated", "TypeError: terminated"]) {
+      assert.equal(recoveryReason(fauxAssistantMessage(fauxToolCall("finish", {}), { stopReason, errorMessage })), undefined);
+    }
   }
 });
 
