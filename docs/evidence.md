@@ -77,7 +77,7 @@ The README's PNG and animated GIF/MP4 are **mechanism storyboards**, illustratin
 ## Existing implementation validation
 
 - Deterministic unit tests for detection, budgets, quoted partial preservation, and cancellation/backoff.
-- The 138-test pre-release suite passed against the **published Pi 1.0.3 SDK**; the final 141-test suite passes against **Pi 1.1.0**, now the pinned development version. Integration tests use a real `AgentSession` and Pi's in-memory faux provider. No real model APIs or credentials are used.
+- The 138-test pre-release suite passed against the **published Pi 1.0.3 SDK**; the current 150-test suite passes against **Pi 1.1.0**, now the pinned development version. Integration tests use a real `AgentSession` and Pi's in-memory faux provider. No real model APIs or credentials are used.
 - Explicit `terminated` / `TypeError: terminated` fixtures in `tests/terminated.test.ts` cover empty/partial responses, native-first retry, exhausted-native fallback, protocol safety, budgets, cancellation, and queued steering input.
 - `tests/usage-limit.test.ts` uses a virtual clock to cover minute extraction, five-hour reset waits, exact and approximate zero-minute guidance, native 429 retry ordering, cancellation, queued input, total budgets, and protocol-safe partial context across provider/login error wording, plus the 15-minute guidance-less poll, its 5-hour give-up, and its independence from the resume cap.
 - Isolated offline RPC installation/command-load verification.
