@@ -25,11 +25,11 @@ for (const error of [
 }
 
 for (const error of [
-  "401 authentication failed", "403 forbidden", "429 insufficient_quota", "monthly usage limit reached",
+  "401 authentication failed", "403 forbidden", "429 insufficient_quota",
   "billing exhausted", "quota exceeded", "Invalid API key; please retry your request",
   "context_length_exceeded; please retry your request", "prompt is too long",
   "content_filter", "400 invalid request; stream closed", "Unknown deterministic failure",
-  "subscription_sharing_usage_limit_exceeded", "model not found", "invalid max_tokens value",
+  "model not found", "invalid max_tokens value",
   "401 authentication failed; stream terminated", "429 insufficient_quota; stream terminated",
   "context_length_exceeded; stream terminated", "content_filter; stream terminated",
 ]) {

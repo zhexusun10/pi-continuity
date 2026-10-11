@@ -30,10 +30,22 @@ const PERMANENT_ERROR = [
   /content.?filter|safety|policy.?violation/i,
   /invalid.?request|invalid.?argument|invalid.?param|not[\s_-]+found|not_found|not.?supported/i,
 ];
-const ACCOUNT_LIMIT_ERROR = /insufficient_quota|quota.?exceeded|out of budget|billing|usage.?limit|available balance/i;
+const TERMINAL_ACCOUNT_ERROR = /insufficient_quota|quota.?exceeded|out of budget|billing|available balance/i;
+const USAGE_LIMIT_ERROR = /usage.?limit/i;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 const WAIT_POLL_MS = 1_000;
 export const APPROXIMATE_RESET_BUFFER_MS = 30_000;
+
+/**
+ * Guidance-less subscription/usage limits (for example a Codex mid-stream
+ * "usage limit has been reached" error) carry no reset timestamp. They are
+ * retried at this fixed interval until the provider recovers or the window
+ * below is exhausted. Polling has its own bound and does not consume the
+ * total resume budget.
+ */
+export const USAGE_POLL_DELAY_MS = 15 * 60_000;
+export const USAGE_POLL_WINDOW_MS = 5 * 60 * 60_000;
+export const USAGE_POLL_MAX_ATTEMPTS = Math.ceil(USAGE_POLL_WINDOW_MS / USAGE_POLL_DELAY_MS);
 
 /** Provider-independent: only explicit minute-based retry guidance authorizes a timed limit recovery. */
 export function usageLimitDelayMs(error: string): number | undefined {
@@ -74,7 +86,9 @@ export function recoveryReason(message: AssistantMessage): RecoveryReason | unde
     if (isContextOverflow(message)) return undefined; // Pi owns compact-and-retry.
     if (PERMANENT_ERROR.some((pattern) => pattern.test(error))) return undefined;
     if (usageLimitDelayMs(error) !== undefined) return "usage-limit";
-    if (ACCOUNT_LIMIT_ERROR.test(error)) return undefined;
+    if (TERMINAL_ACCOUNT_ERROR.test(error)) return undefined;
+    // Subscription usage limits without an advertised reset fall back to bounded polling.
+    if (USAGE_LIMIT_ERROR.test(error)) return "usage-limit";
     if (OUTPUT_TRUNCATION.some((pattern) => pattern.test(error))) return "truncation";
     if (isRetryableAssistantError(message) || TRANSIENT_ERROR.some((pattern) => pattern.test(error))) return "stream-error";
     return undefined;

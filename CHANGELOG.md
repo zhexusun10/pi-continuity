@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-11
+
+### Added
+
+- Bounded 15-minute polling for subscription usage limits without an advertised reset time (for example a Codex mid-stream `Codex error: The usage limit has been reached`). It retries the same task for up to 5 hours (20 attempts), then gives up and preserves the raw failure. The poll has its own bound, independent of `--continuity-max-resumes`, and is disabled by `--continuity=false` or `--continuity-max-resumes=0`.
+- Virtual-clock coverage for the poll cadence, the 5-hour give-up, resume-cap independence, terminal billing/quota exclusion, and cancellation/queued input.
+
+### Changed
+
+- Split account/usage-limit classification: `insufficient_quota`, `quota exceeded`, `out of budget`, `billing`, and `available balance` remain terminal, while subscription usage-limit errors without valid minute guidance now use the bounded poll. Timed `Try again in ...` recovery is unchanged and still consumes the total resume budget.
+
 ## [0.1.1] - 2026-10-11
 
 ### Added

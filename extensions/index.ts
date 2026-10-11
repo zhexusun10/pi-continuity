@@ -4,7 +4,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import {
   CHECKPOINT_TYPE, CONTINUATION_TYPE, DEFAULT_CHECKPOINT_MAX_CHARS, DEFAULT_OPTIONS, DEFAULT_STREAM_DELAY_MS, DEFAULT_STREAM_RETRIES,
-  MAX_CHECKPOINT_CHARS, RecoveryBudget,
+  MAX_CHECKPOINT_CHARS, RecoveryBudget, USAGE_POLL_DELAY_MS, USAGE_POLL_MAX_ATTEMPTS, USAGE_POLL_WINDOW_MS,
   checkpointContent, limitPartial, mergePartial, parseBoolean, parseCount, readablePartial, recoveryReason, streamDelay, usageLimitDelayMs, waitForBackoff,
   type ContinuityOptions, type RecoveryReason,
 } from "../lib/continuity.ts";
@@ -17,11 +17,18 @@ interface LastTurn {
   partial: string;
   resumed: boolean;
   usageWaitCompleted?: boolean;
+  usagePoll?: boolean;
 }
 
 interface PendingWait {
   controller: AbortController;
   retryAt: number;
+}
+
+interface UsagePoll {
+  deadline: number;
+  attempts: number;
+  exhausted: boolean;
 }
 
 interface RecoveryArtifact {
@@ -45,6 +52,7 @@ export default function piContinuity(pi: ExtensionAPI): void {
   let firstRequestAfterSession = false;
   let last: LastTurn | undefined;
   let waiting: PendingWait | undefined;
+  let usagePoll: UsagePoll | undefined;
   let warned = false;
 
   // Pi's boolean CLI flags are presence-only; strings allow explicit --flag=false.
@@ -71,6 +79,7 @@ export default function piContinuity(pi: ExtensionAPI): void {
     waiting = undefined;
     if (advanceRequestId) requestId++;
     budget = new RecoveryBudget();
+    usagePoll = undefined;
     if (!preserveLast) last = undefined;
     warned = false;
     if (ctx.mode === "tui") ctx.ui.setStatus("pi-continuity", undefined);
@@ -167,6 +176,42 @@ export default function piContinuity(pi: ExtensionAPI): void {
     return false;
   }
 
+  /** Bounded 15-minute polling for usage limits without an advertised reset time. */
+  function scheduleUsagePoll(ctx: ExtensionContext): number | undefined {
+    if (options.maxResumes === 0) return undefined; // 0 disables all extension-scheduled continuations.
+    const now = Date.now();
+    usagePoll ??= { deadline: now + USAGE_POLL_WINDOW_MS, attempts: 0, exhausted: false };
+    const remaining = usagePoll.deadline - now;
+    if (usagePoll.attempts >= USAGE_POLL_MAX_ATTEMPTS || remaining <= 0) {
+      if (!usagePoll.exhausted) {
+        usagePoll.exhausted = true;
+        if (ctx.hasUI) {
+          ctx.ui.notify(
+            `pi-continuity: usage limit has no reset time after ${USAGE_POLL_WINDOW_MS / 3_600_000} h; giving up.`,
+            "warning",
+          );
+        }
+      }
+      return undefined;
+    }
+    usagePoll.attempts++;
+    return Math.min(USAGE_POLL_DELAY_MS, remaining);
+  }
+
+  /** Wait at `turn_end` while the public abort signal is still live; never wait at settlement. */
+  async function waitForLimit(turn: LastTurn, delayMs: number, status: string, ctx: ExtensionContext): Promise<void> {
+    const pending = { controller: new AbortController(), retryAt: Date.now() + delayMs };
+    waiting = pending;
+    if (ctx.mode === "tui") ctx.ui.setStatus("pi-continuity", status);
+    const signal = ctx.signal ? AbortSignal.any([pending.controller.signal, ctx.signal]) : pending.controller.signal;
+    turn.usageWaitCompleted = await waitForBackoff(delayMs, signal, () =>
+      last !== turn || !options.enabled || ctx.hasPendingMessages());
+    if (waiting === pending) {
+      waiting = undefined;
+      if (ctx.mode === "tui") ctx.ui.setStatus("pi-continuity", undefined);
+    }
+  }
+
   function omitInterrupted(entries: SessionBoundaryDraft[], turn: LastTurn): SessionBoundaryDraft[] {
     // Keep raw history/usage intact, but don't replay broken signed reasoning or orphan tool calls.
     return [...entries, ...[turn.entryId, ...turn.toolResultIds].map((targetId): SessionBoundaryDraft => ({
@@ -179,7 +224,9 @@ export default function piContinuity(pi: ExtensionAPI): void {
       "with complete arguments; do not treat partial calls as results. Tool names: " + JSON.stringify(toolNames) : "";
   }
 
-  function resume(event: TurnEndEvent | AgentBeforeSettleEvent, turn: LastTurn, reason: RecoveryReason, ctx: ExtensionContext): BoundaryResult {
+  function resume(
+    event: TurnEndEvent | AgentBeforeSettleEvent, turn: LastTurn, reason: RecoveryReason, ctx: ExtensionContext, record = true,
+  ): BoundaryResult {
     const interrupted = reason !== "tool-tail";
     const baseEntries = interrupted ? omitInterrupted(event.entries, turn) : [...event.entries];
     const unexecutedTools = interrupted
@@ -188,14 +235,17 @@ export default function piContinuity(pi: ExtensionAPI): void {
     const entries = interrupted
       ? checkpointDraft(event, turn, unexecutedToolsSuffix(unexecutedTools), baseEntries)
       : omitRecoveryArtifacts(baseEntries, event);
-    budget.record(reason);
+    if (record) budget.record(reason);
     turn.resumed = true;
+    const attempt = record ? budget.total : usagePoll?.attempts ?? 0;
     entries.push({
       // A plain custom entry records the scheduled attempt without adding user text to the LLM context.
       type: "custom", customType: CONTINUATION_TYPE,
-      data: { requestId, reason, attempt: budget.total, sourceEntryId: turn.entryId, originalStopReason: turn.message.stopReason },
+      data: { requestId, reason, attempt, sourceEntryId: turn.entryId, originalStopReason: turn.message.stopReason },
     });
-    if (ctx.mode === "tui") ctx.ui.setStatus("pi-continuity", `continuity: ${reason} #${budget.total}`);
+    if (ctx.mode === "tui") {
+      ctx.ui.setStatus("pi-continuity", record ? `continuity: ${reason} #${budget.total}` : `continuity: usage-limit poll #${attempt}`);
+    }
     return { entries, continue: true };
   }
 
@@ -284,23 +334,38 @@ export default function piContinuity(pi: ExtensionAPI): void {
     }
     if (last.message.stopReason === "error") {
       const turn = last;
-      if (reason === "usage-limit" && !hasOtherWork(event, ctx) && reserve(reason, ctx)) {
+      if (reason === "usage-limit" && !hasOtherWork(event, ctx)) {
         // Wait while the turn still has a live public abort signal. Post-run settlement
         // has no active signal in Pi 1.0.x/1.1.0; waiting there could trap Escape for hours.
         // This also prevents native 429 retries from ignoring the advertised reset time.
-        const delayMs = usageLimitDelayMs(turn.message.errorMessage ?? "")!;
-        const pending = { controller: new AbortController(), retryAt: Date.now() + delayMs };
-        waiting = pending;
-        if (ctx.mode === "tui") ctx.ui.setStatus("pi-continuity", `continuity: usage limit; retry in ${Math.ceil(delayMs / 60_000)} min`);
-        if (ctx.hasUI) ctx.ui.notify(`pi-continuity: provider limit; waiting ${delayMs / 60_000} min before continuing.`, "warning");
-        const signal = ctx.signal ? AbortSignal.any([pending.controller.signal, ctx.signal]) : pending.controller.signal;
-        turn.usageWaitCompleted = await waitForBackoff(delayMs, signal, () =>
-          last !== turn || !options.enabled || ctx.hasPendingMessages());
-        if (waiting === pending) {
-          waiting = undefined;
-          if (ctx.mode === "tui") ctx.ui.setStatus("pi-continuity", undefined);
+        const delayMs = usageLimitDelayMs(turn.message.errorMessage ?? "");
+        if (delayMs !== undefined) {
+          if (reserve(reason, ctx)) {
+            if (ctx.hasUI) ctx.ui.notify(`pi-continuity: provider limit; waiting ${delayMs / 60_000} min before continuing.`, "warning");
+            await waitForLimit(turn, delayMs, `continuity: usage limit; retry in ${Math.ceil(delayMs / 60_000)} min`, ctx);
+            if (last !== turn || ctx.signal?.aborted) return;
+          }
+        } else {
+          // No advertised reset: poll at a fixed interval within a bounded window.
+          const pollDelayMs = scheduleUsagePoll(ctx);
+          if (pollDelayMs !== undefined) {
+            const attempt = usagePoll?.attempts ?? 0;
+            turn.usagePoll = true;
+            if (attempt === 1 && ctx.hasUI) {
+              ctx.ui.notify(
+                `pi-continuity: usage limit has no reset time; polling every ${USAGE_POLL_DELAY_MS / 60_000} min ` +
+                  `for up to ${USAGE_POLL_WINDOW_MS / 3_600_000} h.`,
+                "warning",
+              );
+            }
+            await waitForLimit(
+              turn, pollDelayMs,
+              `continuity: usage limit; poll ${attempt}/${USAGE_POLL_MAX_ATTEMPTS} in ${Math.ceil(pollDelayMs / 60_000)} min`,
+              ctx,
+            );
+            if (last !== turn || ctx.signal?.aborted) return;
+          }
         }
-        if (last !== turn || ctx.signal?.aborted) return;
       }
       // Native retry runs AFTER agent_end and omits the failed assistant. A safe, bounded
       // checkpoint survives that omission and replaces older checkpoints instead of accumulating them.
@@ -315,13 +380,15 @@ export default function piContinuity(pi: ExtensionAPI): void {
     if (!turn || turn.resumed || event.outcome === "aborted" || ctx.signal?.aborted || hasOtherWork(event, ctx)) return;
     const reason = recoveryReason(turn.message);
     if (!reason || !eligible(reason) || (reason === "usage-limit" && !turn.usageWaitCompleted)) return;
+    // Polling already authorized its own bounded window at turn_end; it does not consume the resume cap.
+    const polled = reason === "usage-limit" && turn.usagePoll === true;
     if (reason === "tool-tail") {
       // A previous extension may already have replaced/omitted the final tool call or added user context.
       const projected = event.context.contextEntries.find((entry) => entry.sourceEntry.id === turn.entryId)
         ?.messages.find((message): message is AssistantMessage => message.role === "assistant");
       if (!projected || recoveryReason(projected) !== "tool-tail" || event.context.llmMessages.at(-1)?.role === "user") return;
     }
-    if (!reserve(reason, ctx)) return;
+    if (!polled && !reserve(reason, ctx)) return;
     if (reason === "stream-error" || reason === "empty-response") {
       const delayMs = streamDelay(options.streamDelayMs, budget.streams + 1);
       const pending = { controller: new AbortController(), retryAt: Date.now() + delayMs };
@@ -332,7 +399,7 @@ export default function piContinuity(pi: ExtensionAPI): void {
       if (!completed || last !== turn || !options.enabled || ctx.signal?.aborted ||
         event.context.pendingMessages.length > 0 || ctx.hasPendingMessages()) return;
     }
-    return resume(event, turn, reason, ctx);
+    return resume(event, turn, reason, ctx, !polled);
   });
 
   pi.registerCommand("pi-continuity", {
@@ -351,6 +418,9 @@ export default function piContinuity(pi: ExtensionAPI): void {
         `Last/current user request: ${budget.total}/${options.maxResumes === Infinity ? "unlimited" : options.maxResumes} extra continuations; ${budget.streams}/${options.streamRetries} stream recoveries.`,
         `Truncation ${budget.counts.truncation}; stream errors ${budget.counts["stream-error"]}; usage limits ${budget.counts["usage-limit"]}; empty responses ${budget.counts["empty-response"]}; tool tails ${budget.counts["tool-tail"]}.`,
         ...(waiting ? [`Next recovery in ${Math.max(0, Math.ceil((waiting.retryAt - Date.now()) / 60_000))} min.`] : []),
+        ...(usagePoll ? [`Usage-limit polling: ${usagePoll.attempts}/${USAGE_POLL_MAX_ATTEMPTS}; ${
+          usagePoll.exhausted ? "gave up" : `gives up in ${Math.max(0, Math.ceil((usagePoll.deadline - Date.now()) / 60_000))} min`
+        }.`] : []),
       ].join("\n"), "info");
     },
   });

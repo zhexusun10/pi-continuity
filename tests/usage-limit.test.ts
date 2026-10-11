@@ -5,13 +5,18 @@ import { clearTimeout as nodeClearTimeout, setTimeout as nodeSetTimeout } from "
 import { setImmediate } from "node:timers/promises";
 import { Type, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import {
-  APPROXIMATE_RESET_BUFFER_MS, DEFAULT_OPTIONS, RecoveryBudget, recoveryReason, usageLimitDelayMs, waitForBackoff,
+  APPROXIMATE_RESET_BUFFER_MS, DEFAULT_OPTIONS, RecoveryBudget, USAGE_POLL_DELAY_MS, USAGE_POLL_MAX_ATTEMPTS,
+  USAGE_POLL_WINDOW_MS, recoveryReason, usageLimitDelayMs, waitForBackoff,
 } from "../lib/continuity.ts";
 import { allText, createHarness } from "./harness.ts";
 
 const usageError = (minutes = 300, content = "partial plan", approximate = true) => fauxAssistantMessage(content, {
   stopReason: "error",
   errorMessage: `You have hit your ChatGPT usage limit (plus plan). Try again in ${approximate ? "~" : ""}${minutes} min.`,
+});
+
+const pollError = (content = "partial plan") => fauxAssistantMessage(content, {
+  stopReason: "error", errorMessage: "Codex error: The usage limit has been reached",
 });
 
 /** Virtual wall clock without experimental MockTimers or real minute/hour waits. */
@@ -76,13 +81,38 @@ for (const errorMessage of [
   "Try again in Infinity min.", "Try again in NaN min.", "Try again in 1e3 min.",
   "Try again in 9007199254740992 min.", "Try again in 2 seconds.", "Try again in 2 hours.",
 ]) {
-  test(`no minute capture from missing/invalid guidance: ${errorMessage}`, () => {
+  test(`missing/invalid guidance falls back to bounded polling: ${errorMessage}`, () => {
     assert.equal(usageLimitDelayMs(errorMessage), undefined);
     assert.equal(recoveryReason(fauxAssistantMessage("", {
       stopReason: "error", errorMessage: `usage limit reached: ${errorMessage}`,
-    })), undefined);
+    })), "usage-limit");
   });
 }
+
+test("usage-limit polling has a fixed 15-minute schedule within a five-hour window", () => {
+  assert.equal(USAGE_POLL_DELAY_MS, 15 * 60_000);
+  assert.equal(USAGE_POLL_WINDOW_MS, 5 * 60 * 60_000);
+  assert.equal(USAGE_POLL_MAX_ATTEMPTS, 20);
+  for (const error of [
+    "Codex error: The usage limit has been reached",
+    "You have hit your ChatGPT usage limit (plus plan).",
+    "monthly usage limit reached",
+    "subscription_sharing_usage_limit_exceeded",
+    "usage_limit_reached",
+  ]) {
+    assert.equal(usageLimitDelayMs(error), undefined);
+    assert.equal(recoveryReason(fauxAssistantMessage("", { stopReason: "error", errorMessage: error })), "usage-limit");
+  }
+});
+
+test("billing/quota exhaustion keeps guidance-less limits terminal", () => {
+  for (const errorMessage of [
+    "insufficient_quota", "quota exceeded", "out of budget", "billing exhausted", "available balance",
+    "usage limit reached; insufficient_quota",
+  ]) {
+    assert.equal(recoveryReason(fauxAssistantMessage("", { stopReason: "error", errorMessage })), undefined);
+  }
+});
 
 test("guidance in successful output or an aborted response never authorizes recovery", () => {
   assert.equal(recoveryReason(fauxAssistantMessage("Try again in ~5 min.")), undefined);
@@ -164,6 +194,120 @@ for (const errorMessage of [
     assert.equal(h.continuations().length, 1);
     assert.match(allText(h.requests[1]!), /keep this plan/);
     assert.equal(h.events.filter((event) => event.type === "agent_settled").length, 1);
+    assert.deepEqual(h.errors, []);
+  });
+}
+
+test("guidance-less usage limits poll every 15 minutes until the provider recovers", async (t) => {
+  const h = await createHarness();
+  t.after(h.cleanup);
+  const clock = fakeClock(t);
+  h.setResponses([pollError("FIRST_PARTIAL"), pollError("SECOND_PARTIAL"), fauxAssistantMessage("done")]);
+  const run = h.session.prompt("Finish the task");
+  await until(() => clock.pending() > 0);
+  clock.advance(USAGE_POLL_DELAY_MS - 1);
+  await setImmediate();
+  assert.equal(h.requests.length, 1);
+  clock.advance(1);
+  await until(() => h.requests.length === 2 && clock.pending() > 0);
+  assert.match(allText(h.requests[1]!), /FIRST_PARTIAL/);
+  clock.advance(USAGE_POLL_DELAY_MS);
+  await run;
+  assert.equal(h.requests.length, 3);
+  assert.equal(h.continuations().length, 2);
+  assert.match(allText(h.requests[2]!), /SECOND_PARTIAL/);
+  const raw = h.manager.getBranch().find((entry) => entry.type === "message" &&
+    entry.message.role === "assistant" && entry.message.stopReason === "error");
+  assert.ok(raw?.type === "message" && raw.message.role === "assistant");
+  assert.equal(raw.message.errorMessage, "Codex error: The usage limit has been reached");
+  assert.deepEqual(h.errors, []);
+});
+
+test("guidance-less polling gives up after five hours without rewriting the failure", async (t) => {
+  const h = await createHarness();
+  t.after(h.cleanup);
+  const clock = fakeClock(t);
+  h.setResponses([...Array.from({ length: USAGE_POLL_MAX_ATTEMPTS + 1 }, () => pollError()), fauxAssistantMessage("unused")]);
+  const run = h.session.prompt("Finish the task");
+  for (let attempt = 0; attempt < USAGE_POLL_MAX_ATTEMPTS; attempt++) {
+    await until(() => clock.pending() > 0);
+    clock.advance(USAGE_POLL_DELAY_MS);
+  }
+  await run;
+  assert.equal(h.requests.length, USAGE_POLL_MAX_ATTEMPTS + 1);
+  assert.equal(h.continuations().length, USAGE_POLL_MAX_ATTEMPTS);
+  assert.equal(h.events.at(-1)?.type, "agent_settled");
+  const failures = h.manager.getBranch().filter((entry) => entry.type === "message" &&
+    entry.message.role === "assistant" && entry.message.stopReason === "error");
+  assert.equal(failures.length, USAGE_POLL_MAX_ATTEMPTS + 1);
+  assert.deepEqual(h.errors, []);
+});
+
+test("usage-limit polling is bounded by its own window, not the resume cap", async (t) => {
+  const h = await createHarness({ flags: { "continuity-max-resumes": "1" } });
+  t.after(h.cleanup);
+  const clock = fakeClock(t);
+  h.setResponses([pollError(), pollError(), fauxAssistantMessage("done")]);
+  const run = h.session.prompt("Finish the task");
+  await until(() => clock.pending() > 0);
+  clock.advance(USAGE_POLL_DELAY_MS);
+  await until(() => h.requests.length === 2 && clock.pending() > 0);
+  clock.advance(USAGE_POLL_DELAY_MS);
+  await run;
+  assert.equal(h.requests.length, 3);
+  assert.equal(h.continuations().length, 2);
+  assert.deepEqual(h.errors, []);
+});
+
+for (const cancel of ["abort", "direct-queue"] as const) {
+  test(`${cancel} interrupts a usage-limit poll without an extension continuation`, async (t) => {
+    const h = await createHarness();
+    t.after(h.cleanup);
+    const clock = fakeClock(t);
+    h.setResponses([pollError(), fauxAssistantMessage("new instruction done")]);
+    const run = h.session.prompt("Original task");
+    await until(() => clock.pending() > 0);
+    if (cancel === "abort") {
+      const aborted = h.session.abort();
+      await run;
+      await aborted;
+    } else {
+      await h.session.steer("New instruction");
+      clock.advance(1_000);
+      await run;
+    }
+    assert.equal(h.continuations().length, 0);
+    assert.equal(h.requests.length, cancel === "direct-queue" ? 2 : 1);
+    if (h.requests.length === 2) assert.match(allText(h.requests[1]!), /New instruction/);
+    assert.equal(h.events.at(-1)?.type, "agent_settled");
+    assert.deepEqual(h.errors, []);
+  });
+}
+
+for (const flags of [{ continuity: "false" }, { "continuity-max-resumes": "0" }] as Record<string, string>[]) {
+  test(`disabled recovery does not poll guidance-less usage limits: ${JSON.stringify(flags)}`, async (t) => {
+    const h = await createHarness({ flags });
+    t.after(h.cleanup);
+    const clock = fakeClock(t);
+    h.setResponses([pollError(), fauxAssistantMessage("unused")]);
+    await h.session.prompt("Task");
+    assert.equal(clock.pending(), 0);
+    assert.equal(h.requests.length, 1);
+    assert.equal(h.continuations().length, 0);
+    assert.deepEqual(h.errors, []);
+  });
+}
+
+for (const errorMessage of ["insufficient_quota", "billing exhausted"]) {
+  test(`terminal account limit without guidance never polls: ${errorMessage}`, async (t) => {
+    const h = await createHarness();
+    t.after(h.cleanup);
+    const clock = fakeClock(t);
+    h.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage }), fauxAssistantMessage("unused")]);
+    await h.session.prompt("Task");
+    assert.equal(clock.pending(), 0);
+    assert.equal(h.requests.length, 1);
+    assert.equal(h.continuations().length, 0);
     assert.deepEqual(h.errors, []);
   });
 }
