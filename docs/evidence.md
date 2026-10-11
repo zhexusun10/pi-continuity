@@ -62,6 +62,12 @@ A tool batch can terminate the loop's normal follow-up. If the final substantive
 
 An extension loaded into that session can change which assistant is final by actually making another request. It does not change this check or determine the reward. The outcome of a thrown exception depends on the surrounding evaluator; the guard itself does not assign a score.
 
+### 6. Codex minute-based reset guidance
+
+The additional usage-limit implementation was checked against Pi **1.1.0** source revision `cdaf6c227d4718a72b59ccd02152c9614df44cfc`. [`parseErrorResponse()`](https://github.com/earendil-works/pi/blob/cdaf6c227d4718a72b59ccd02152c9614df44cfc/packages/ai/src/api/openai-codex-responses.ts#L1596-L1623) emits `You have hit your ChatGPT usage limit (plus plan). Try again in ~N min.` when the HTTP error includes a reset timestamp. The plan suffix is optional; `N` is the rounded remaining minutes, not a guarantee of the exact reset instant. Other transport/error paths may expose different wording.
+
+The extension recognizes explicit minute guidance in finalized error messages independently of the provider/login. It adds 30 seconds for `~` rounding, waits at the live `turn_end` cancellation boundary, then leaves native retry first refusal before its settlement fallback. This source observation is not a real-provider experiment; the virtual-clock tests validate only control flow.
+
 ## Illustration provenance
 
 The README's PNG and animated GIF/MP4 are **mechanism storyboards**, illustrating the documented loop policy. They are not captured executions, new tests, live TUI recordings, or model-quality measurements. They do not plot the paper's 48/100 observation as this extension's success rate. [Rendering source and reproduction](assets.md).
@@ -69,8 +75,9 @@ The README's PNG and animated GIF/MP4 are **mechanism storyboards**, illustratin
 ## Existing implementation validation
 
 - Deterministic unit tests for detection, budgets, quoted partial preservation, and cancellation/backoff.
-- Integration tests use the **published Pi 1.0.3 SDK**, a real `AgentSession`, and Pi's in-memory faux provider. No real model APIs or credentials are used.
+- The 138-test pre-release suite passed against the **published Pi 1.0.3 SDK**; the final 141-test suite passes against **Pi 1.1.0**, now the pinned development version. Integration tests use a real `AgentSession` and Pi's in-memory faux provider. No real model APIs or credentials are used.
 - Explicit `terminated` / `TypeError: terminated` fixtures in `tests/terminated.test.ts` cover empty/partial responses, native-first retry, exhausted-native fallback, protocol safety, budgets, cancellation, and queued steering input.
+- `tests/usage-limit.test.ts` uses a virtual clock to cover minute extraction, five-hour reset waits, exact and approximate zero-minute guidance, native 429 retry ordering, cancellation, queued input, total budgets, and protocol-safe partial context across provider/login error wording.
 - Isolated offline RPC installation/command-load verification.
 
 These validate the extension's control flow and package loading. The paper's Terminal-Bench 4.0 results provide the benchmark evidence for the underlying recovery problem; a separate real-model comparison would measure this package's task outcomes.

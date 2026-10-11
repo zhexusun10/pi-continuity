@@ -1,6 +1,6 @@
 import { isContextOverflow, isRetryableAssistantError, type AssistantMessage } from "@earendil-works/pi-ai";
 
-export type RecoveryReason = "truncation" | "stream-error" | "empty-response" | "tool-tail";
+export type RecoveryReason = "truncation" | "stream-error" | "usage-limit" | "empty-response" | "tool-tail";
 
 export interface ContinuityOptions {
   enabled: boolean;
@@ -25,12 +25,26 @@ export const CONTINUATION_TYPE = "pi-continuity";
 export const CHECKPOINT_TYPE = "pi-continuity-checkpoint";
 
 const PERMANENT_ERROR = [
-  /\b(?:401|402|403)\b/i, /unauthori[sz]ed|forbidden|authentication/i,
+  /\b(?:401|402|403)\b(?!\s*min(?:s|utes?)?\b)/i, /unauthori[sz]ed|forbidden|authentication/i,
   /invalid.?api.?key|permission.?denied/i,
-  /insufficient_quota|quota.?exceeded|out of budget|billing|usage.?limit|available balance/i,
   /content.?filter|safety|policy.?violation/i,
   /invalid.?request|invalid.?argument|invalid.?param|not[\s_-]+found|not_found|not.?supported/i,
 ];
+const ACCOUNT_LIMIT_ERROR = /insufficient_quota|quota.?exceeded|out of budget|billing|usage.?limit|available balance/i;
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+const WAIT_POLL_MS = 1_000;
+export const APPROXIMATE_RESET_BUFFER_MS = 30_000;
+
+/** Provider-independent: only explicit minute-based retry guidance authorizes a timed limit recovery. */
+export function usageLimitDelayMs(error: string): number | undefined {
+  const match = /\b(?:try again|retry) in\s+(~?)\s*(\d+(?:\.\d+)?)\s*min(?:s|utes?)?\b/i.exec(error);
+  if (!match) return undefined;
+  // Pi rounds Codex reset minutes to the nearest integer. The ~ form can be
+  // almost 30 seconds early; without this margin, ~0 min can exhaust the budget.
+  const delay = Math.ceil(Number(match[2]) * 60_000) + (match[1] ? APPROXIMATE_RESET_BUFFER_MS : 0);
+  return Number.isSafeInteger(delay) && Number.isSafeInteger(Date.now() + delay) ? delay : undefined;
+}
+
 const TRANSIENT_ERROR = [
   /\b(?:429|500|502|503|504|520|524)\b/i,
   /overloaded|at capacity|high demand|rate.?limit|too many requests|service.?unavailable|temporarily unavailable|server.?error|internal.?error/i,
@@ -59,6 +73,8 @@ export function recoveryReason(message: AssistantMessage): RecoveryReason | unde
     const error = message.errorMessage ?? "";
     if (isContextOverflow(message)) return undefined; // Pi owns compact-and-retry.
     if (PERMANENT_ERROR.some((pattern) => pattern.test(error))) return undefined;
+    if (usageLimitDelayMs(error) !== undefined) return "usage-limit";
+    if (ACCOUNT_LIMIT_ERROR.test(error)) return undefined;
     if (OUTPUT_TRUNCATION.some((pattern) => pattern.test(error))) return "truncation";
     if (isRetryableAssistantError(message) || TRANSIENT_ERROR.some((pattern) => pattern.test(error))) return "stream-error";
     return undefined;
@@ -132,7 +148,7 @@ export function streamDelay(base: number, attempt: number): number {
 export class RecoveryBudget {
   total = 0;
   streams = 0;
-  counts: Record<RecoveryReason, number> = { truncation: 0, "stream-error": 0, "empty-response": 0, "tool-tail": 0 };
+  counts: Record<RecoveryReason, number> = { truncation: 0, "stream-error": 0, "usage-limit": 0, "empty-response": 0, "tool-tail": 0 };
 
   canResume(reason: RecoveryReason, options: ContinuityOptions): boolean {
     if (!options.enabled || this.total >= options.maxResumes) return false;
@@ -146,18 +162,26 @@ export class RecoveryBudget {
   }
 }
 
-/** Returns false on cancellation; always removes the timer and abort listener. */
-export function waitForBackoff(ms: number, signal?: AbortSignal): Promise<boolean> {
-  if (signal?.aborted) return Promise.resolve(false);
+/** Returns false on cancellation/pending work; long waits never overflow Node's timer limit. */
+export function waitForBackoff(ms: number, signal?: AbortSignal, shouldStop?: () => boolean): Promise<boolean> {
+  if (signal?.aborted || shouldStop?.()) return Promise.resolve(false);
   if (ms === 0) return Promise.resolve(true);
   return new Promise((resolve) => {
+    const deadline = Date.now() + ms;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const finish = (completed: boolean) => {
       clearTimeout(timer);
       signal?.removeEventListener("abort", onAbort);
       resolve(completed);
     };
     const onAbort = () => finish(false);
-    const timer = setTimeout(() => finish(true), ms);
+    const tick = () => {
+      if (signal?.aborted || shouldStop?.()) return finish(false);
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return finish(true);
+      timer = setTimeout(tick, Math.min(remaining, shouldStop ? WAIT_POLL_MS : MAX_TIMER_DELAY_MS));
+    };
     signal?.addEventListener("abort", onAbort, { once: true });
+    tick();
   });
 }
