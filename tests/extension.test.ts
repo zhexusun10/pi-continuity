@@ -134,16 +134,16 @@ test("native retry gets the readable partial checkpoint without an extra fallbac
   assert.deepEqual(h.errors, []);
 });
 
-test("stream fallback allows six attempts by default", async (t) => {
+test("stream fallback allows twelve attempts by default", async (t) => {
   const h = await createHarness();
   t.after(h.cleanup);
   h.setResponses([
-    ...Array.from({ length: 6 }, () => broken("fetch failed")),
+    ...Array.from({ length: 12 }, () => broken("fetch failed")),
     fauxAssistantMessage("done"),
   ]);
   await h.session.prompt("Finish the task");
-  assert.equal(h.requests.length, 7);
-  assert.equal(h.continuations().length, 6);
+  assert.equal(h.requests.length, 13);
+  assert.equal(h.continuations().length, 12);
   assert.deepEqual(h.errors, []);
 });
 test("extra stream recovery follows exhausted native retries, never races them", async (t) => {

@@ -94,8 +94,8 @@ pi --continuity-tool-tail=false
 | 参数 | 默认 | 含义 |
 | --- | ---: | --- |
 | `--continuity` | `true` | `--continuity=false` 关闭扩展恢复。 |
-| `--continuity-max-resumes` | `8` | 每条真实用户请求最多由扩展安排 8 次模型轮次。`0` 禁用；`unlimited` 移除总上限。 |
-| `--continuity-stream-retries` | `6` | 原生 retry 之后最多补 6 次 stream/空响应恢复；默认 3 次 5 秒，再 3 次 10 秒。`0` 只禁用这两种 fallback，不关闭定时限额恢复。 |
+| `--continuity-max-resumes` | `16` | 每条真实用户请求最多由扩展安排 16 次模型轮次。`0` 禁用；`unlimited` 移除总上限。 |
+| `--continuity-stream-retries` | `12` | 原生 retry 之后最多补 12 次 stream/空响应恢复；默认 3 次 5 秒，再 9 次 10 秒。`0` 只禁用这两种 fallback，不关闭定时限额恢复。 |
 | `--continuity-stream-delay-ms` | `5000` | stream/空响应额外恢复的基础等待毫秒数；第 1～3 次使用该值，之后使用 2 倍，最多 10 秒。 |
 | `--continuity-checkpoint-max-chars` | `12000` | 活跃 checkpoint 中最多合并的可读 partial 字符数，硬上限 64000。`0` 不复制 partial 文本/思考。 |
 | `--continuity-tool-tail` | `true` | 是否恢复停在 tool call 的任务。 |
@@ -103,7 +103,7 @@ pi --continuity-tool-tail=false
 布尔参数必须显式写值，例如 `--continuity=false`，不是 presence-only flag。无重置时间的用量限额轮询有独立上限（5 小时内最多 20 次）；用 `--continuity=false` 或 `--continuity-max-resumes=0` 可关闭。
 
 ```bash
-pi --continuity-max-resumes 12 --continuity-stream-retries 6
+pi --continuity-max-resumes 20 --continuity-stream-retries 12
 pi --continuity-stream-delay-ms 5000
 pi --continuity-checkpoint-max-chars 8000
 pi --continuity-tool-tail=false

@@ -13,11 +13,11 @@ export interface ContinuityOptions {
 
 export const DEFAULT_CHECKPOINT_MAX_CHARS = 12_000;
 export const MAX_CHECKPOINT_CHARS = 64_000;
-export const DEFAULT_STREAM_RETRIES = 6;
+export const DEFAULT_STREAM_RETRIES = 12;
 export const DEFAULT_STREAM_DELAY_MS = 5_000;
 export const EXTENDED_STREAM_DELAY_MS = 10_000;
 export const DEFAULT_OPTIONS: Readonly<ContinuityOptions> = Object.freeze({
-  enabled: true, maxResumes: 8, streamRetries: DEFAULT_STREAM_RETRIES, streamDelayMs: DEFAULT_STREAM_DELAY_MS,
+  enabled: true, maxResumes: 16, streamRetries: DEFAULT_STREAM_RETRIES, streamDelayMs: DEFAULT_STREAM_DELAY_MS,
   checkpointMaxChars: DEFAULT_CHECKPOINT_MAX_CHARS, toolTail: true,
 });
 export const MAX_STREAM_DELAY_MS = EXTENDED_STREAM_DELAY_MS;
@@ -58,13 +58,17 @@ export function usageLimitDelayMs(error: string): number | undefined {
 }
 
 const TRANSIENT_ERROR = [
-  /\b(?:429|500|502|503|504|520|524)\b/i,
+  /\b(?:429|500|502|503|504|52[0-6])\b/i,
   /overloaded|at capacity|high demand|rate.?limit|too many requests|service.?unavailable|temporarily unavailable|server.?error|internal.?error/i,
-  /ECONNRESET|ECONNREFUSED|ECONNABORTED|ETIMEDOUT|EPIPE|ENOTFOUND|EAI_AGAIN|UND_ERR_/i,
-  /network.?error|connection.?error|connection.?refused|connection.?lost|fetch failed|upstream.?connect|provider.?returned.?error/i,
+  /bad gateway|gateway timeout|temporarily overloaded|engine overloaded|system is busy|model is busy|server is busy/i,
+  /ECONNRESET|ECONNREFUSED|ECONNABORTED|ETIMEDOUT|EPIPE|ENOTFOUND|EAI_AGAIN|UND_ERR_|ERR_HTTP2_|ERR_STREAM_|ERR_NETWORK_CHANGED/i,
+  /network.?error|connection.?error|connection.?refused|connection.?lost|fetch failed|failed to fetch|network request failed|upstream.?connect|provider.?returned.?error/i,
+  /client network socket disconnected|peer connection was lost|connection reset by peer/i,
+  /tls (?:handshake )?(?:timeout|error|failed)|ssl (?:handshake )?(?:timeout|error|failed)/i,
   /socket hang up|socket connection was closed|websocket.?closed|websocket.?error|reset before headers/i,
   /premature (?:close|end)|unexpected (?:EOF|end of (?:stream|input|JSON))/i,
   /incomplete (?:stream|chunk|response)|stream ended without|stream ended before|http2 request did not get a response/i,
+  /RST_STREAM|GOAWAY|aborted by the (?:server|upstream)/i,
   /timed? out|timeout|terminated|resource.?exhausted|please retry|try your request again/i,
   /(?:stream|connection|socket|websocket).*(?:disconnect|interrupt|closed|closing|reset|EOF|end(?:ed|ing)? unexpectedly)/i,
 ];
@@ -72,17 +76,18 @@ const OUTPUT_TRUNCATION = [
   /(?:output|response|completion).*(?:truncated|cut (?:off|short))/i,
   /(?:hit|reached|exceeded).*(?:output token(?:s)? (?:limit|cap)|max_(?:output|completion)_tokens|max_tokens)/i,
   /(?:max_(?:output|completion)_tokens|max_tokens|output token(?:s)? limit).*(?:hit|reached|exceeded|truncated|cut (?:off|short))/i,
-  /(?:maximum|top|allowed)\s+(?:output|completion) token(?:s)?(?: limit| cap)?[^\n]*(?:hit|reached|exceeded|truncated|cut (?:off|short))/i,
-  /(?:finish[_ -]?reason|stop[_ -]?reason)\s*[:=]\s*length\b/i,
+  /(?:maximum|top|allowed|max)\s+(?:output|completion)?\s*token(?:s)?(?: limit| cap)?[^\n]*(?:hit|reached|exceeded|truncated|cut (?:off|short))/i,
+  /(?:finish[_ -]?reason|stop[_ -]?reason)\s*[:=]\s*(?:length|max_tokens)\b/i,
 ];
 
 const PARTIAL_OMISSION_MARKER = "\n...[older partial context omitted]...\n";
 
 /** No inference from prose such as "I will continue" or ordinary tool errors. */
 export function recoveryReason(message: AssistantMessage): RecoveryReason | undefined {
+  if (!message || typeof message !== "object") return undefined;
   if (message.stopReason === "length") return "truncation";
   if (message.stopReason === "error") {
-    const error = message.errorMessage ?? "";
+    const error = typeof message.errorMessage === "string" ? message.errorMessage.trim() : "";
     if (isContextOverflow(message)) return undefined; // Pi owns compact-and-retry.
     if (PERMANENT_ERROR.some((pattern) => pattern.test(error))) return undefined;
     if (usageLimitDelayMs(error) !== undefined) return "usage-limit";
@@ -94,9 +99,11 @@ export function recoveryReason(message: AssistantMessage): RecoveryReason | unde
     return undefined;
   }
   if (message.stopReason !== "stop" && message.stopReason !== "toolUse") return undefined;
+  if (!Array.isArray(message.content)) return "empty-response";
   const last = message.content.findLast((block) => {
-    if (block.type === "text") return block.text.trim().length > 0;
-    if (block.type === "thinking") return Boolean(block.redacted || block.thinking.trim());
+    if (!block || typeof block !== "object") return false;
+    if (block.type === "text") return typeof block.text === "string" && block.text.trim().length > 0;
+    if (block.type === "thinking") return Boolean(block.redacted || (typeof block.thinking === "string" && block.thinking.trim()));
     return true;
   });
   if (last?.type === "toolCall") return "tool-tail";
@@ -106,9 +113,13 @@ export function recoveryReason(message: AssistantMessage): RecoveryReason | unde
 
 /** Readable fragments only; never serialize tool arguments, signatures, or redacted thinking. */
 export function readablePartial(message: AssistantMessage): string {
+  if (!message || !Array.isArray(message.content)) return "";
   return message.content.flatMap((block) => {
-    if (block.type === "text" && block.text.trim()) return [`Partial assistant text:\n${block.text}`];
-    if (block.type === "thinking" && !block.redacted && block.thinking.trim()) {
+    if (!block || typeof block !== "object") return [];
+    if (block.type === "text" && typeof block.text === "string" && block.text.trim()) {
+      return [`Partial assistant text:\n${block.text}`];
+    }
+    if (block.type === "thinking" && !block.redacted && typeof block.thinking === "string" && block.thinking.trim()) {
       return [`Partial reasoning (unfinished, not a verified result):\n${block.thinking}`];
     }
     return [];
@@ -116,7 +127,7 @@ export function readablePartial(message: AssistantMessage): string {
 }
 
 export function limitPartial(partial: string, maxChars = DEFAULT_CHECKPOINT_MAX_CHARS): string {
-  if (maxChars <= 0 || !partial) return "";
+  if (typeof maxChars !== "number" || !Number.isFinite(maxChars) || maxChars <= 0 || !partial) return "";
   if (partial.length <= maxChars) return partial;
   const available = maxChars - PARTIAL_OMISSION_MARKER.length;
   if (available <= 0) return partial.slice(0, maxChars);
@@ -154,7 +165,8 @@ export function parseCount(value: boolean | string | undefined, name: string, fa
 }
 
 export function streamDelay(base: number, attempt: number): number {
-  const phaseDelay = attempt > 3 ? Math.min(base * 2, MAX_STREAM_DELAY_MS) : base;
+  const safeBase = typeof base === "number" && Number.isFinite(base) && base > 0 ? base : 0;
+  const phaseDelay = attempt > 3 ? Math.min(safeBase * 2, MAX_STREAM_DELAY_MS) : safeBase;
   return Math.min(phaseDelay, MAX_STREAM_DELAY_MS);
 }
 
@@ -179,7 +191,7 @@ export class RecoveryBudget {
 /** Returns false on cancellation/pending work; long waits never overflow Node's timer limit. */
 export function waitForBackoff(ms: number, signal?: AbortSignal, shouldStop?: () => boolean): Promise<boolean> {
   if (signal?.aborted || shouldStop?.()) return Promise.resolve(false);
-  if (ms === 0) return Promise.resolve(true);
+  if (!Number.isFinite(ms) || ms <= 0) return Promise.resolve(true);
   return new Promise((resolve) => {
     const deadline = Date.now() + ms;
     let timer: ReturnType<typeof setTimeout> | undefined;

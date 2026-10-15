@@ -14,9 +14,11 @@ for (const content of ["partial text", fauxThinking("unfinished thought"), [], f
 
 for (const error of [
   "Stream ended without a stop reason", "Anthropic stream ended before message_stop", "fetch failed",
-  "network connection lost", "ECONNRESET", "Unexpected EOF", "Incomplete chunked response",
+  "failed to fetch", "network request failed", "network connection lost", "ECONNRESET", "Unexpected EOF", "Incomplete chunked response",
   "Provider finish_reason: network_error", "Premature close", "stream interrupted", "UND_ERR_SOCKET",
-  "ENOTFOUND api.example.com", "503 service unavailable", "429 rate limit exceeded",
+  "ERR_HTTP2_STREAM_ERROR", "RST_STREAM", "GOAWAY", "connection reset by peer", "bad gateway", "gateway timeout",
+  "ENOTFOUND api.example.com", "503 service unavailable", "429 rate limit exceeded", "521 web server is down",
+  "522 connection timed out", "524 a timeout occurred", "525 SSL handshake failed",
   "terminated", "Error: terminated", "TypeError: terminated",
 ]) {
   test(`transient classifier: ${error}`, () => {
@@ -42,6 +44,8 @@ test("explicit output-cap errors are not mistaken for input-context overflow", (
   assert.equal(recoveryReason(fauxAssistantMessage("", { stopReason: "error", errorMessage: "Response truncated after it reached max_output_tokens" })), "truncation");
   assert.equal(recoveryReason(fauxAssistantMessage("", { stopReason: "error", errorMessage: "max_completion_tokens reached" })), "truncation");
   assert.equal(recoveryReason(fauxAssistantMessage("", { stopReason: "error", errorMessage: "maximum output tokens exceeded" })), "truncation");
+  assert.equal(recoveryReason(fauxAssistantMessage("", { stopReason: "error", errorMessage: "finish_reason: max_tokens" })), "truncation");
+  assert.equal(recoveryReason(fauxAssistantMessage("", { stopReason: "error", errorMessage: "stop_reason = max_tokens" })), "truncation");
   assert.equal(recoveryReason(fauxAssistantMessage("", { stopReason: "error", errorMessage: "context_length_exceeded after response truncated" })), undefined);
 });
 
@@ -84,7 +88,7 @@ test("partial context keeps readable reasoning/text, but not replay metadata or 
 });
 
 test("partial checkpoints stay bounded and preserve chronological progress", () => {
-  assert.equal(DEFAULT_OPTIONS.maxResumes, 8);
+  assert.equal(DEFAULT_OPTIONS.maxResumes, 16);
   assert.equal(DEFAULT_OPTIONS.checkpointMaxChars, DEFAULT_CHECKPOINT_MAX_CHARS);
   const merged = mergePartial("first attempt", "second attempt", 120);
   assert.ok(merged.indexOf("first attempt") < merged.indexOf("second attempt"));
@@ -92,6 +96,8 @@ test("partial checkpoints stay bounded and preserve chronological progress", () 
   assert.equal(bounded.length, DEFAULT_CHECKPOINT_MAX_CHARS);
   assert.match(bounded, /older partial context omitted/);
   assert.equal(limitPartial("discarded", 0), "");
+  assert.equal(limitPartial("discarded", -1), "");
+  assert.equal(limitPartial("discarded", NaN), "");
 });
 
 test("total and stream budgets do not reset on successful tool progress", () => {
@@ -126,10 +132,13 @@ test("valued boolean flags work with --flag=false, unlike Pi's presence-only boo
   assert.throws(() => parseBoolean("no", "enabled", true), /true or false/);
 });
 
-test("stream recovery uses three 5-second defaults then three 10-second delays", () => {
+test("stream recovery uses three 5-second defaults then nine 10-second delays", () => {
   assert.equal(DEFAULT_OPTIONS.streamRetries, DEFAULT_STREAM_RETRIES);
   assert.equal(DEFAULT_OPTIONS.streamDelayMs, DEFAULT_STREAM_DELAY_MS);
-  assert.deepEqual([1, 2, 3, 4, 5, 6].map((n) => streamDelay(DEFAULT_STREAM_DELAY_MS, n)), [5_000, 5_000, 5_000, 10_000, 10_000, 10_000]);
+  assert.deepEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((n) => streamDelay(DEFAULT_STREAM_DELAY_MS, n)), [
+    5_000, 5_000, 5_000,
+    10_000, 10_000, 10_000, 10_000, 10_000, 10_000, 10_000, 10_000, 10_000,
+  ]);
   assert.equal(streamDelay(0, 1), 0);
   assert.equal(streamDelay(100_000, 4), 10_000);
 });
@@ -142,4 +151,24 @@ test("backoff honors cancellation and removes abort listeners", async () => {
   assert.equal(await waitForBackoff(0, controller.signal), false);
   assert.equal(await waitForBackoff(1), true);
   assert.equal(await waitForBackoff(0), true);
+  assert.equal(await waitForBackoff(-100), true);
+  assert.equal(await waitForBackoff(NaN), true);
 });
+
+test("robustness: malformed messages and edge cases do not crash", () => {
+  // @ts-expect-error malformed message test
+  assert.equal(recoveryReason(null), undefined);
+  // @ts-expect-error malformed message test
+  assert.equal(recoveryReason(undefined), undefined);
+  // @ts-expect-error malformed message test
+  assert.equal(recoveryReason({}), undefined);
+  // Non-array content returns empty-response for stopReason stop
+  // @ts-expect-error malformed content test
+  assert.equal(recoveryReason({ role: "assistant", stopReason: "stop", content: "not-an-array" }), "empty-response");
+  // @ts-expect-error malformed content test
+  assert.equal(readablePartial({ role: "assistant", content: null }), "");
+  // Malformed blocks in content
+  // @ts-expect-error malformed block test
+  assert.equal(readablePartial({ role: "assistant", content: [null, undefined, {}, { type: "unknown" }] }), "");
+});
+

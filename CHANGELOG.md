@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-15
+
+### Changed
+
+- Expanded the default continuation limits to over 10:
+  - `--continuity-max-resumes`: increased from 8 to 16 per user request.
+  - `--continuity-stream-retries`: increased from 6 to 12 attempts (3 attempts at 5 seconds, followed by 9 attempts at 10 seconds).
+- Enhanced runtime robustness across providers and edge cases:
+  - Expanded transient error classification to cover Cloudflare 5xx edge codes (`520`–`526`), HTTP/2 stream errors (`ERR_HTTP2_STREAM_ERROR`, `ERR_STREAM_PREMATURE_CLOSE`, `RST_STREAM`, `GOAWAY`), network failure variations (`failed to fetch`, `network request failed`, `connection reset by peer`, `bad gateway`, `gateway timeout`), and server overload conditions.
+  - Expanded output truncation detection to recognize provider `finish_reason: max_tokens` and related token limit variants.
+  - Hardened defensive type guards and null-safety across `recoveryReason`, `readablePartial`, `limitPartial`, `streamDelay`, and `unexecutedToolsSuffix` to guard against malformed messages, non-array content, and duplicate tool names.
+
 ## [0.2.0] - 2026-10-11
 
 ### Added

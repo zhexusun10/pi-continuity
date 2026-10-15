@@ -58,7 +58,7 @@ export default function piContinuity(pi: ExtensionAPI): void {
   // Pi's boolean CLI flags are presence-only; strings allow explicit --flag=false.
   pi.registerFlag("continuity", { type: "string", default: "true", description: "Enable recovery (true|false)" });
   pi.registerFlag("continuity-max-resumes", {
-    type: "string", default: "8", description: "Extra continuations per user request (integer or unlimited)",
+    type: "string", default: "16", description: "Extra continuations per user request (integer or unlimited)",
   });
   pi.registerFlag("continuity-stream-retries", {
     type: "string", default: String(DEFAULT_STREAM_RETRIES), description: "Extra stream recoveries after native retries (0 disables)",
@@ -220,8 +220,9 @@ export default function piContinuity(pi: ExtensionAPI): void {
   }
 
   function unexecutedToolsSuffix(toolNames: string[]): string {
-    return toolNames.length ? "\nCalls in the interrupted response were NOT executed. Re-issue any still needed " +
-      "with complete arguments; do not treat partial calls as results. Tool names: " + JSON.stringify(toolNames) : "";
+    const unique = Array.from(new Set(toolNames.filter((name) => typeof name === "string" && name.trim())));
+    return unique.length ? "\nCalls in the interrupted response were NOT executed. Re-issue any still needed " +
+      "with complete arguments; do not treat partial calls as results. Tool names: " + JSON.stringify(unique) : "";
   }
 
   function resume(
@@ -230,7 +231,9 @@ export default function piContinuity(pi: ExtensionAPI): void {
     const interrupted = reason !== "tool-tail";
     const baseEntries = interrupted ? omitInterrupted(event.entries, turn) : [...event.entries];
     const unexecutedTools = interrupted
-      ? turn.message.content.filter((block) => block.type === "toolCall").map((block) => block.name)
+      ? (Array.isArray(turn.message.content)
+        ? turn.message.content.flatMap((block) => block.type === "toolCall" && typeof block.name === "string" ? [block.name] : [])
+        : [])
       : [];
     const entries = interrupted
       ? checkpointDraft(event, turn, unexecutedToolsSuffix(unexecutedTools), baseEntries)
@@ -256,7 +259,7 @@ export default function piContinuity(pi: ExtensionAPI): void {
       options = {
         enabled: parseBoolean(pi.getFlag("continuity"), "continuity", true),
         toolTail: parseBoolean(pi.getFlag("continuity-tool-tail"), "continuity-tool-tail", true),
-        maxResumes: parseCount(pi.getFlag("continuity-max-resumes"), "continuity-max-resumes", 8, true),
+        maxResumes: parseCount(pi.getFlag("continuity-max-resumes"), "continuity-max-resumes", 16, true),
         streamRetries: parseCount(pi.getFlag("continuity-stream-retries"), "continuity-stream-retries", DEFAULT_STREAM_RETRIES),
         streamDelayMs: parseCount(pi.getFlag("continuity-stream-delay-ms"), "continuity-stream-delay-ms", DEFAULT_STREAM_DELAY_MS),
         checkpointMaxChars: parseCheckpointMaxChars(),
@@ -325,7 +328,10 @@ export default function piContinuity(pi: ExtensionAPI): void {
       if (hasOtherWork(event, ctx)) {
         // Existing user input/another continuation already supplies the next request. Still sanitize
         // the truncated protocol content so reasoning-only fragments cannot poison that request.
-        const suffix = unexecutedToolsSuffix(last.message.content.filter((block) => block.type === "toolCall").map((block) => block.name));
+        const unexecuted = Array.isArray(last.message.content)
+          ? last.message.content.flatMap((block) => block.type === "toolCall" && typeof block.name === "string" ? [block.name] : [])
+          : [];
+        const suffix = unexecutedToolsSuffix(unexecuted);
         const entries = checkpointDraft(event, last, suffix, omitInterrupted(event.entries, last));
         return { entries };
       }

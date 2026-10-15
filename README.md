@@ -85,8 +85,8 @@ Timed-limit continuations count toward `--continuity-max-resumes`, not the strea
 | CLI flag | Default | Meaning |
 | --- | ---: | --- |
 | `--continuity` | `true` | Enable extension recovery. Use `--continuity=false` to disable it. |
-| `--continuity-max-resumes` | `8` | Maximum extension-scheduled model turns per actual user request. `0` disables extension recovery; `unlimited` removes this total cap. |
-| `--continuity-stream-retries` | `6` | Extra stream/empty-response recoveries after native retry. The default schedule is three attempts at 5 seconds, then three attempts at 10 seconds. `0` disables this fallback. |
+| `--continuity-max-resumes` | `16` | Maximum extension-scheduled model turns per actual user request. `0` disables extension recovery; `unlimited` removes this total cap. |
+| `--continuity-stream-retries` | `12` | Extra stream/empty-response recoveries after native retry. The default schedule is three attempts at 5 seconds, then nine attempts at 10 seconds. `0` disables this fallback. |
 | `--continuity-stream-delay-ms` | `5000` | Base delay for extra stream/empty-response recoveries. Attempts 1–3 use this value; later attempts use 2x, capped at 10 seconds. |
 | `--continuity-checkpoint-max-chars` | `12000` | Maximum readable partial context merged into the active checkpoint. Hard maximum: `64000`. `0` disables copied partial text/reasoning. |
 | `--continuity-tool-tail` | `true` | Recover a settled tool-call ending. Set `false` for intentionally terminal structured-output or handoff tools. |
@@ -94,7 +94,7 @@ Timed-limit continuations count toward `--continuity-max-resumes`, not the strea
 Boolean flags take explicit values such as `--continuity=false`; they are not presence-only flags. Usage-limit polling is bounded separately at 20 attempts within 5 hours; use `--continuity=false` or `--continuity-max-resumes=0` to disable it.
 
 ```bash
-pi --continuity-max-resumes 12 --continuity-stream-retries 6
+pi --continuity-max-resumes 20 --continuity-stream-retries 12
 pi --continuity-stream-delay-ms 5000
 pi --continuity-checkpoint-max-chars 8000
 pi --continuity-tool-tail=false
