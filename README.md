@@ -5,7 +5,7 @@
 [![CI](https://github.com/zhexusun10/pi-continuity/actions/workflows/ci.yml/badge.svg)](https://github.com/zhexusun10/pi-continuity/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/pi-continuity)](https://www.npmjs.com/package/pi-continuity)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Pi 1.1.0](https://img.shields.io/badge/tested-Pi%201.1.0-blue.svg)](https://pi.dev)
+[![Pi 1.4.0](https://img.shields.io/badge/tested-Pi%201.4.0-blue.svg)](https://pi.dev)
 
 [简体中文](docs/README.zh-CN.md) · [Design](docs/design.md) · [Evidence](docs/evidence.md) · [Source](extensions/index.ts)
 
@@ -21,6 +21,8 @@ These benchmark observations motivate a concrete engineering question: when a re
 pi install npm:pi-continuity
 ```
 
+`pi-continuity@0.3.0` is the latest npm release and supports Pi 1.4.0.
+
 For a GitHub source install:
 
 ```bash
@@ -29,7 +31,7 @@ pi install git:github.com/zhexusun10/pi-continuity
 
 Then start a new Pi process or run `/reload` in an existing session. The package does not patch Pi, call providers directly, or install runtime dependencies.
 
-Requires **Pi 1.0.1+ with actionable session boundaries** and Node.js 22.19+. It works in the Pi CLI and in SDK applications that load and bind the extension to the same `AgentSession` used for the model run.
+Requires **Pi 1.0.1+ with actionable session boundaries** and Node.js 22.19+. Validated against the latest **Pi 1.4.0**; the development dependencies are pinned to 1.4.0. It works in the Pi CLI and in SDK applications that load and bind the extension to the same `AgentSession` used for the model run.
 
 ## What changes?
 
@@ -38,13 +40,13 @@ Requires **Pi 1.0.1+ with actionable session boundaries** and Node.js 22.19+. It
 | `stopReason: "length"`: text, reasoning-only, empty, mixed, or tool-call output | Removes the interrupted assistant protocol from the next model projection, preserves bounded readable partial context when useful, and requests one next model turn at `turn_end`. |
 | A failed provider stream, including `errorMessage: "terminated"` or `"TypeError: terminated"` | Lets Pi's native session retry run first. After native recovery is exhausted, omits the failed assistant, preserves a bounded checkpoint when useful, and requests another model turn with staged delays. |
 | Provider usage limit with `Try again in ~N min.` (including ChatGPT/Codex login) | Waits the advertised minutes plus a 30-second rounding margin for `~`, then continues the same task through the public boundary. Applies to any provider/login with this error text. |
-| Provider usage limit **without** a reset time (for example `Codex error: The usage limit has been reached`) | Polls every 15 minutes for up to 5 hours (20 attempts), then stops and leaves the raw failure in history. Polling has its own bound and does not consume `--continuity-max-resumes`; `--continuity=false` or `--continuity-max-resumes=0` disables it. |
+| Provider usage limit **without** a reset time (for example `Codex error: The usage limit has been reached`) | Polls every 10 minutes for up to 5 hours (30 attempts), then stops and leaves the raw failure in history. Once a window has been given up, later windows use 5 h 20 min (32 attempts) so the poll does not stop at the same instant the provider resets. Polling has its own bound and does not consume `--continuity-max-resumes`; `--continuity=false` or `--continuity-max-resumes=0` disables it. |
 | Successful but empty output | Omits the empty assistant response and requests another model turn using the bounded stream-recovery budget. |
 | A run that ends with a tool call after the tool result | Keeps the completed tool result and requests one next model turn at `agent_before_settle`; it does not add a synthetic user instruction or rerun the tool. |
 
 The extension uses Pi's public session boundary API: `context_edit` repairs the next model projection and `continue: true` asks the `AgentSession` to call its next model turn. It does not inject a synthetic `Continue` user message for every retry. A hidden checkpoint is added only when readable partial progress or an interrupted-tool note is useful.
 
-An ordinary tool call already causes Pi to continue. The extension does not add an extra turn to every tool call. Normal final text, explicit aborts, authentication errors, safety rejections, and unknown deterministic errors are not retried. Billing/quota limits remain terminal; subscription usage limits without explicit retry guidance are polled every 15 minutes for at most 5 hours. Input-context errors remain Pi's compaction responsibility. Clearly reported output-cap errors are supported when a provider represents them as `error` instead of `length`.
+An ordinary tool call already causes Pi to continue. The extension does not add an extra turn to every tool call. Normal final text, explicit aborts, authentication errors, safety rejections, and unknown deterministic errors are not retried. Billing/quota limits remain terminal; subscription usage limits without explicit retry guidance are polled every 10 minutes for at most 5 hours (5 h 20 min after a give-up). Input-context errors remain Pi's compaction responsibility. Clearly reported output-cap errors are supported when a provider represents them as `error` instead of `length`.
 
 ## How it works
 
@@ -65,11 +67,11 @@ The session history is append-only. `context_edit` changes model projection, not
 
 **Advertised reset.** For example, `You have hit your ChatGPT usage limit (plus plan). Try again in ~120 min.` pauses recovery for 120 minutes plus 30 seconds, then continues the existing task. Pi rounds Codex reset minutes to the nearest integer; the margin prevents an early request and rapid budget exhaustion on `~0 min.`. Exact `Try again in 120 min.` waits 120 minutes without the margin. `Retry in N mins/minutes` is also recognized. No provider ID, API key, login method, or plan is hardcoded.
 
-**No advertised reset.** Some transport paths expose the same limit without a reset time (for example a Codex mid-stream `Codex error: The usage limit has been reached`). The extension then polls: it waits 15 minutes, continues the same task, and repeats every 15 minutes until the provider answers or the 5-hour window (20 attempts) is exhausted. Polling has its own bound and does not consume `--continuity-max-resumes`, but `--continuity=false` and `--continuity-max-resumes=0` disable it. Missing, negative, non-finite, or unsafe minute counts fall back to this polling path.
+**No advertised reset.** Some transport paths expose the same limit without a reset time (for example a Codex mid-stream `Codex error: The usage limit has been reached`). The extension then polls: it waits 10 minutes, continues the same task, and repeats until the provider answers or the 5-hour window (30 attempts) is exhausted. A provider's usage window is commonly 5 h, so the first window matches it exactly; once a window has been given up, later windows add a buffer and use 5 h 20 min (32 attempts), so the poll does not stop at the same instant the provider resets. Polling has its own bound and does not consume `--continuity-max-resumes`, but `--continuity=false` and `--continuity-max-resumes=0` disable it. Missing, negative, non-finite, or unsafe minute counts fall back to this polling path.
 
 The wait runs at `turn_end`, while Pi's public cancellation signal is still active, **before** native retries can ignore the reset time. After waiting, native recovery gets first refusal; otherwise `agent_before_settle` requests the next model turn. Escape/SDK abort, `/pi-continuity off`, new input, session reset, or shutdown interrupts the wait. Directly queued SDK input is checked at least once per second. `/pi-continuity status` shows the remaining wait and poll progress. Keep Pi running; restart/reload does not restore a pending timer.
 
-Timed-limit continuations count toward `--continuity-max-resumes`, not the stream sub-cap. Usage-limit polling is bounded by its own 5-hour window instead. `--continuity-stream-retries=0` and the 10-second stream delay cap do not disable or shorten either usage-limit path. Authentication, safety, and input-context errors remain excluded even if they contain usage-limit wording. `insufficient_quota`, `quota exceeded`, `out of budget`, `billing`, and `available balance` remain terminal.
+Timed-limit continuations count toward `--continuity-max-resumes`, not the stream sub-cap. Usage-limit polling is bounded by its own 5-hour window instead (5 h 20 min after a give-up). `--continuity-stream-retries=0` and the 10-second stream delay cap do not disable or shorten either usage-limit path. Authentication, safety, and input-context errors remain excluded even if they contain usage-limit wording. `insufficient_quota`, `quota exceeded`, `out of budget`, `billing`, and `available balance` remain terminal.
 
 ## Controls
 
@@ -91,7 +93,7 @@ Timed-limit continuations count toward `--continuity-max-resumes`, not the strea
 | `--continuity-checkpoint-max-chars` | `12000` | Maximum readable partial context merged into the active checkpoint. Hard maximum: `64000`. `0` disables copied partial text/reasoning. |
 | `--continuity-tool-tail` | `true` | Recover a settled tool-call ending. Set `false` for intentionally terminal structured-output or handoff tools. |
 
-Boolean flags take explicit values such as `--continuity=false`; they are not presence-only flags. Usage-limit polling is bounded separately at 20 attempts within 5 hours; use `--continuity=false` or `--continuity-max-resumes=0` to disable it.
+Boolean flags take explicit values such as `--continuity=false`; they are not presence-only flags. Usage-limit polling is bounded separately at 30 attempts within 5 hours (32 attempts within 5 h 20 min once a window has been given up); use `--continuity=false` or `--continuity-max-resumes=0` to disable it.
 
 ```bash
 pi --continuity-max-resumes 20 --continuity-stream-retries 12
@@ -134,7 +136,7 @@ npm pack --dry-run
 pi -e .
 ```
 
-Tests use Pi's real `AgentSession` and in-memory faux provider. They make no real model requests and use no API keys or paid provider calls. The suite covers output-cap shapes, native retry ordering, fallback budgets, staged delays, virtual five-hour usage-limit waits, 15-minute guidance-less polling and its give-up window, reset rounding, cancellation, queued input, protocol omissions, tool execution safety, and package loading.
+Tests use Pi's real `AgentSession` and in-memory faux provider. They make no real model requests and use no API keys or paid provider calls. The suite covers output-cap shapes, native retry ordering, fallback budgets, staged delays, virtual five-hour usage-limit waits, 10-minute guidance-less polling and its give-up and extended windows, reset rounding, cancellation, queued input, protocol omissions, tool execution safety, and package loading.
 
 The repository also contains optional illustration tooling. See [docs/assets.md](docs/assets.md) to regenerate the PNG/GIF/MP4 storyboard. It does not run Pi or access a provider.
 

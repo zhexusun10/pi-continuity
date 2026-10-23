@@ -20,6 +20,9 @@ for (const error of [
   "ENOTFOUND api.example.com", "503 service unavailable", "429 rate limit exceeded", "521 web server is down",
   "522 connection timed out", "524 a timeout occurred", "525 SSL handshake failed",
   "terminated", "Error: terminated", "TypeError: terminated",
+  "Stream error occurred",
+  "stream error: stream ID 1; PROTOCOL_ERROR; received from peer",
+  "[System Error] Post \"https://example.test/v1/responses\": stream error: stream ID 1; PROTOCOL_ERROR; received from peer",
 ]) {
   test(`transient classifier: ${error}`, () => {
     assert.equal(recoveryReason(fauxAssistantMessage("", { stopReason: "error", errorMessage: error })), "stream-error");
@@ -32,6 +35,10 @@ for (const error of [
   "context_length_exceeded; please retry your request", "prompt is too long",
   "content_filter", "400 invalid request; stream closed", "Unknown deterministic failure",
   "model not found", "invalid max_tokens value",
+  "stream error: invalid API key",
+  "stream error: 401 authentication failed",
+  "stream error: context_length_exceeded",
+  "stream error: insufficient_quota",
   "401 authentication failed; stream terminated", "429 insufficient_quota; stream terminated",
   "context_length_exceeded; stream terminated", "content_filter; stream terminated",
 ]) {

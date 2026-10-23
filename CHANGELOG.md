@@ -1,6 +1,16 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.0] - 2026-10-23
+
+### Changed
+
+- Validate and pin the development dependencies to **Pi 1.4.0** (was 1.1.0); the 171-test suite, `npm run check`, and offline load verification pass against 1.4.0.
+- Guidance-less usage-limit polling now waits 10 minutes per attempt (was 15). The bounded window is still 5 hours (30 attempts).
+- Once a 5-hour polling window has been exhausted (the extension gave up), later windows add a 20-minute buffer and use 5 hours 20 minutes (32 attempts). A provider's usage window is commonly 5 h, so a later window that started when the task resumed could otherwise give up at the same instant the provider reset. The counter is per session and resets on `session_start`.
+
+### Fixed
+
+- Classify bare `stream error` wrappers as transient so recovery no longer fails closed on provider/proxy messages such as `Stream error occurred` or Go HTTP/2 relays reporting `stream error: stream ID 1; PROTOCOL_ERROR; received from peer`. Permanent, context-overflow, and usage/billing checks still run first, so `stream error: invalid API key`, `stream error: context_length_exceeded`, and `stream error: insufficient_quota` remain terminal.
 
 ## [0.2.1] - 2026-10-15
 

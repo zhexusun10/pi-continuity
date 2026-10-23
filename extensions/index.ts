@@ -4,7 +4,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import {
   CHECKPOINT_TYPE, CONTINUATION_TYPE, DEFAULT_CHECKPOINT_MAX_CHARS, DEFAULT_OPTIONS, DEFAULT_STREAM_DELAY_MS, DEFAULT_STREAM_RETRIES,
-  MAX_CHECKPOINT_CHARS, RecoveryBudget, USAGE_POLL_DELAY_MS, USAGE_POLL_MAX_ATTEMPTS, USAGE_POLL_WINDOW_MS,
+  EXTENDED_USAGE_POLL_WINDOW_MS, MAX_CHECKPOINT_CHARS, RecoveryBudget, USAGE_POLL_DELAY_MS, USAGE_POLL_WINDOW_MS,
   checkpointContent, limitPartial, mergePartial, parseBoolean, parseCount, readablePartial, recoveryReason, streamDelay, usageLimitDelayMs, waitForBackoff,
   type ContinuityOptions, type RecoveryReason,
 } from "../lib/continuity.ts";
@@ -28,6 +28,8 @@ interface PendingWait {
 interface UsagePoll {
   deadline: number;
   attempts: number;
+  maxAttempts: number;
+  windowMs: number;
   exhausted: boolean;
 }
 
@@ -53,6 +55,7 @@ export default function piContinuity(pi: ExtensionAPI): void {
   let last: LastTurn | undefined;
   let waiting: PendingWait | undefined;
   let usagePoll: UsagePoll | undefined;
+  let usagePollExhaustions = 0;
   let warned = false;
 
   // Pi's boolean CLI flags are presence-only; strings allow explicit --flag=false.
@@ -176,18 +179,39 @@ export default function piContinuity(pi: ExtensionAPI): void {
     return false;
   }
 
-  /** Bounded 15-minute polling for usage limits without an advertised reset time. */
+  /** Render a poll window for user-facing status text, e.g. "5 h" or "5 h 20 min". */
+  function formatUsageWindow(ms: number): string {
+    const minutes = Math.round(ms / 60_000);
+    const hours = Math.floor(minutes / 60);
+    const rest = minutes % 60;
+    return rest === 0 ? `${hours} h` : `${hours} h ${rest} min`;
+  }
+
+  /** Bounded polling for usage limits without an advertised reset time. */
   function scheduleUsagePoll(ctx: ExtensionContext): number | undefined {
     if (options.maxResumes === 0) return undefined; // 0 disables all extension-scheduled continuations.
     const now = Date.now();
-    usagePoll ??= { deadline: now + USAGE_POLL_WINDOW_MS, attempts: 0, exhausted: false };
+    if (!usagePoll) {
+      // The first 5 h window matches the common provider reset. After a window is
+      // exhausted, later windows add a buffer so the poll cannot give up at the
+      // same instant the provider resets.
+      const windowMs = usagePollExhaustions === 0 ? USAGE_POLL_WINDOW_MS : EXTENDED_USAGE_POLL_WINDOW_MS;
+      usagePoll = {
+        deadline: now + windowMs,
+        attempts: 0,
+        maxAttempts: Math.ceil(windowMs / USAGE_POLL_DELAY_MS),
+        windowMs,
+        exhausted: false,
+      };
+    }
     const remaining = usagePoll.deadline - now;
-    if (usagePoll.attempts >= USAGE_POLL_MAX_ATTEMPTS || remaining <= 0) {
+    if (usagePoll.attempts >= usagePoll.maxAttempts || remaining <= 0) {
       if (!usagePoll.exhausted) {
         usagePoll.exhausted = true;
+        usagePollExhaustions++;
         if (ctx.hasUI) {
           ctx.ui.notify(
-            `pi-continuity: usage limit has no reset time after ${USAGE_POLL_WINDOW_MS / 3_600_000} h; giving up.`,
+            `pi-continuity: usage limit has no reset time after ${formatUsageWindow(usagePoll.windowMs)}; giving up.`,
             "warning",
           );
         }
@@ -254,6 +278,7 @@ export default function piContinuity(pi: ExtensionAPI): void {
 
   pi.on("session_start", (_event, ctx) => {
     reset(ctx);
+    usagePollExhaustions = 0;
     firstRequestAfterSession = true;
     try {
       options = {
@@ -360,13 +385,13 @@ export default function piContinuity(pi: ExtensionAPI): void {
             if (attempt === 1 && ctx.hasUI) {
               ctx.ui.notify(
                 `pi-continuity: usage limit has no reset time; polling every ${USAGE_POLL_DELAY_MS / 60_000} min ` +
-                  `for up to ${USAGE_POLL_WINDOW_MS / 3_600_000} h.`,
+                  `for up to ${formatUsageWindow(usagePoll?.windowMs ?? USAGE_POLL_WINDOW_MS)}.`,
                 "warning",
               );
             }
             await waitForLimit(
               turn, pollDelayMs,
-              `continuity: usage limit; poll ${attempt}/${USAGE_POLL_MAX_ATTEMPTS} in ${Math.ceil(pollDelayMs / 60_000)} min`,
+              `continuity: usage limit; poll ${attempt}/${usagePoll?.maxAttempts ?? 0} in ${Math.ceil(pollDelayMs / 60_000)} min`,
               ctx,
             );
             if (last !== turn || ctx.signal?.aborted) return;
@@ -424,7 +449,7 @@ export default function piContinuity(pi: ExtensionAPI): void {
         `Last/current user request: ${budget.total}/${options.maxResumes === Infinity ? "unlimited" : options.maxResumes} extra continuations; ${budget.streams}/${options.streamRetries} stream recoveries.`,
         `Truncation ${budget.counts.truncation}; stream errors ${budget.counts["stream-error"]}; usage limits ${budget.counts["usage-limit"]}; empty responses ${budget.counts["empty-response"]}; tool tails ${budget.counts["tool-tail"]}.`,
         ...(waiting ? [`Next recovery in ${Math.max(0, Math.ceil((waiting.retryAt - Date.now()) / 60_000))} min.`] : []),
-        ...(usagePoll ? [`Usage-limit polling: ${usagePoll.attempts}/${USAGE_POLL_MAX_ATTEMPTS}; ${
+        ...(usagePoll ? [`Usage-limit polling: ${usagePoll.attempts}/${usagePoll.maxAttempts}; ${
           usagePoll.exhausted ? "gave up" : `gives up in ${Math.max(0, Math.ceil((usagePoll.deadline - Date.now()) / 60_000))} min`
         }.`] : []),
       ].join("\n"), "info");

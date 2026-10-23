@@ -5,8 +5,9 @@ import { clearTimeout as nodeClearTimeout, setTimeout as nodeSetTimeout } from "
 import { setImmediate } from "node:timers/promises";
 import { Type, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import {
-  APPROXIMATE_RESET_BUFFER_MS, DEFAULT_OPTIONS, RecoveryBudget, USAGE_POLL_DELAY_MS, USAGE_POLL_MAX_ATTEMPTS,
-  USAGE_POLL_WINDOW_MS, recoveryReason, usageLimitDelayMs, waitForBackoff,
+  APPROXIMATE_RESET_BUFFER_MS, DEFAULT_OPTIONS, EXTENDED_USAGE_POLL_MAX_ATTEMPTS, EXTENDED_USAGE_POLL_WINDOW_MS,
+  RecoveryBudget, USAGE_POLL_DELAY_MS, USAGE_POLL_MAX_ATTEMPTS, USAGE_POLL_WINDOW_MS, recoveryReason, usageLimitDelayMs,
+  waitForBackoff,
 } from "../lib/continuity.ts";
 import { allText, createHarness } from "./harness.ts";
 
@@ -89,10 +90,12 @@ for (const errorMessage of [
   });
 }
 
-test("usage-limit polling has a fixed 15-minute schedule within a five-hour window", () => {
-  assert.equal(USAGE_POLL_DELAY_MS, 15 * 60_000);
+test("usage-limit polling has a fixed 10-minute schedule within a five-hour window", () => {
+  assert.equal(USAGE_POLL_DELAY_MS, 10 * 60_000);
   assert.equal(USAGE_POLL_WINDOW_MS, 5 * 60 * 60_000);
-  assert.equal(USAGE_POLL_MAX_ATTEMPTS, 20);
+  assert.equal(USAGE_POLL_MAX_ATTEMPTS, 30);
+  assert.equal(EXTENDED_USAGE_POLL_WINDOW_MS, 5 * 60 * 60_000 + 20 * 60_000);
+  assert.equal(EXTENDED_USAGE_POLL_MAX_ATTEMPTS, 32);
   for (const error of [
     "Codex error: The usage limit has been reached",
     "You have hit your ChatGPT usage limit (plus plan).",
@@ -198,7 +201,7 @@ for (const errorMessage of [
   });
 }
 
-test("guidance-less usage limits poll every 15 minutes until the provider recovers", async (t) => {
+test("guidance-less usage limits poll every 10 minutes until the provider recovers", async (t) => {
   const h = await createHarness();
   t.after(h.cleanup);
   const clock = fakeClock(t);
@@ -256,6 +259,39 @@ test("usage-limit polling is bounded by its own window, not the resume cap", asy
   await run;
   assert.equal(h.requests.length, 3);
   assert.equal(h.continuations().length, 2);
+  assert.deepEqual(h.errors, []);
+});
+
+test("an exhausted five-hour window extends later polls to five hours twenty minutes", async (t) => {
+  const h = await createHarness();
+  t.after(h.cleanup);
+  const clock = fakeClock(t);
+
+  h.setResponses([
+    ...Array.from({ length: USAGE_POLL_MAX_ATTEMPTS + 1 }, () => pollError()),
+    fauxAssistantMessage("unused"),
+  ]);
+  const first = h.session.prompt("First task");
+  for (let attempt = 0; attempt < USAGE_POLL_MAX_ATTEMPTS; attempt++) {
+    await until(() => clock.pending() > 0);
+    clock.advance(USAGE_POLL_DELAY_MS);
+  }
+  await first;
+  assert.equal(h.requests.length, USAGE_POLL_MAX_ATTEMPTS + 1);
+  assert.equal(h.continuations().length, USAGE_POLL_MAX_ATTEMPTS);
+
+  h.setResponses([
+    ...Array.from({ length: EXTENDED_USAGE_POLL_MAX_ATTEMPTS + 1 }, () => pollError()),
+    fauxAssistantMessage("done"),
+  ]);
+  const second = h.session.prompt("Second task");
+  for (let attempt = 0; attempt < EXTENDED_USAGE_POLL_MAX_ATTEMPTS; attempt++) {
+    await until(() => clock.pending() > 0);
+    clock.advance(USAGE_POLL_DELAY_MS);
+  }
+  await second;
+  assert.equal(h.requests.length, USAGE_POLL_MAX_ATTEMPTS + EXTENDED_USAGE_POLL_MAX_ATTEMPTS + 2);
+  assert.equal(h.continuations().length, USAGE_POLL_MAX_ATTEMPTS + EXTENDED_USAGE_POLL_MAX_ATTEMPTS);
   assert.deepEqual(h.errors, []);
 });
 

@@ -42,10 +42,17 @@ export const APPROXIMATE_RESET_BUFFER_MS = 30_000;
  * retried at this fixed interval until the provider recovers or the window
  * below is exhausted. Polling has its own bound and does not consume the
  * total resume budget.
+ *
+ * A provider's usage window is commonly 5 h. The first window waits exactly
+ * that long. Once a window has been exhausted (the extension gave up), later
+ * windows add a buffer so the poll does not stop at the same instant the
+ * provider resets.
  */
-export const USAGE_POLL_DELAY_MS = 15 * 60_000;
+export const USAGE_POLL_DELAY_MS = 10 * 60_000;
 export const USAGE_POLL_WINDOW_MS = 5 * 60 * 60_000;
+export const EXTENDED_USAGE_POLL_WINDOW_MS = USAGE_POLL_WINDOW_MS + 20 * 60_000;
 export const USAGE_POLL_MAX_ATTEMPTS = Math.ceil(USAGE_POLL_WINDOW_MS / USAGE_POLL_DELAY_MS);
+export const EXTENDED_USAGE_POLL_MAX_ATTEMPTS = Math.ceil(EXTENDED_USAGE_POLL_WINDOW_MS / USAGE_POLL_DELAY_MS);
 
 /** Provider-independent: only explicit minute-based retry guidance authorizes a timed limit recovery. */
 export function usageLimitDelayMs(error: string): number | undefined {
@@ -68,7 +75,13 @@ const TRANSIENT_ERROR = [
   /socket hang up|socket connection was closed|websocket.?closed|websocket.?error|reset before headers/i,
   /premature (?:close|end)|unexpected (?:EOF|end of (?:stream|input|JSON))/i,
   /incomplete (?:stream|chunk|response)|stream ended without|stream ended before|http2 request did not get a response/i,
-  /RST_STREAM|GOAWAY|aborted by the (?:server|upstream)/i,
+  // Bare "stream error" wrappers (for example Go HTTP/2 relays reporting
+  // "stream error: stream ID 1; PROTOCOL_ERROR; received from peer", or a
+  // proxy's "Stream error occurred") carry no status code. Permanent/auth/
+  // overflow/usage checks run first, so a terminal cause with this prefix is
+  // still excluded.
+  /\bstream error\b/i,
+  /RST_STREAM|GOAWAY|PROTOCOL_ERROR|aborted by the (?:server|upstream)/i,
   /timed? out|timeout|terminated|resource.?exhausted|please retry|try your request again/i,
   /(?:stream|connection|socket|websocket).*(?:disconnect|interrupt|closed|closing|reset|EOF|end(?:ed|ing)? unexpectedly)/i,
 ];

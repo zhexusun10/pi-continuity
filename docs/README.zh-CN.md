@@ -16,6 +16,8 @@
 pi install npm:pi-continuity
 ```
 
+`pi-continuity@0.3.0` 是最新 npm 版本，支持 Pi 1.4.0。
+
 也可以通过 GitHub 安装：
 
 ```bash
@@ -24,7 +26,7 @@ pi install git:github.com/zhexusun10/pi-continuity
 
 安装后重新启动 Pi，或在当前会话执行 `/reload`。扩展不修改 Pi 文件、不直接访问 provider、不安装运行时依赖。
 
-需要具有可操作 session boundary 的 **Pi 1.0.1+** 和 Node.js 22.19+。它适用于 Pi CLI，也适用于正确加载并绑定扩展的 `AgentSession` SDK 程序。
+需要具有可操作 session boundary 的 **Pi 1.0.1+** 和 Node.js 22.19+。已针对最新的 **Pi 1.4.0** 验证，开发依赖固定为 1.4.0。它适用于 Pi CLI，也适用于正确加载并绑定扩展的 `AgentSession` SDK 程序。
 
 ## 它解决什么问题？
 
@@ -33,13 +35,13 @@ pi install git:github.com/zhexusun10/pi-continuity
 | `stopReason: "length"`：文字、纯思考、空输出、混合内容或工具调用 | 从下一次模型投影中移除不完整 assistant 协议；有可读进展时保存有界 partial，并在 `turn_end` 请求下一轮模型请求。 |
 | provider stream 失败，包括 `errorMessage: "terminated"` / `"TypeError: terminated"` | 先让 Pi 原生 session retry 处理；原生恢复耗尽后，移除失败 assistant，必要时保存有界 checkpoint，再按分段等待策略请求下一轮。 |
 | 用量限额错误含 `Try again in ~N min.`，包括 ChatGPT/Codex 登录 | 等待 N 分钟，并对 `~` 近似值增加 30 秒取整余量，再通过公开 boundary 继续原任务；不限定 provider、套餐或登录方式。 |
-| 用量限额错误**不含**重置时间（例如 Codex 流内错误 `Codex error: The usage limit has been reached`） | 每 15 分钟轮询一次，最多持续 5 小时（20 次），然后停止并把原始失败保留在历史中。轮询有独立上限，不计入 `--continuity-max-resumes`；`--continuity=false` 或 `--continuity-max-resumes=0` 可关闭。 |
+| 用量限额错误**不含**重置时间（例如 Codex 流内错误 `Codex error: The usage limit has been reached`） | 每 10 分钟轮询一次，最多持续 5 小时（30 次），然后停止并把原始失败保留在历史中。某个窗口放弃后，后续窗口延长到 5 小时 20 分（32 次），避免在 provider 重置的同一刻停止轮询。轮询有独立上限，不计入 `--continuity-max-resumes`；`--continuity=false` 或 `--continuity-max-resumes=0` 可关闭。 |
 | 成功但为空的 assistant 输出 | 移除空 assistant，并使用 stream recovery 预算请求下一轮。 |
 | 工具结果已经完成但任务停在 tool call | 保留已完成的 tool result，在 `agent_before_settle` 请求下一轮；不添加合成 user 指令，也不重复执行工具。 |
 
 扩展使用 Pi 提供的公开 session boundary API：通过 `context_edit` 修复下一次模型请求的投影，通过 `continue: true` 让 `AgentSession` 发起下一轮。它不会为每次 retry 添加隐藏的 `Continue` user 文本。只有需要传递可读 partial 或说明中断工具未执行时，才添加隐藏 checkpoint。
 
-普通工具调用本来就会让 Pi 继续。正常文字结束、显式取消、认证/权限错误、安全拒绝和未知确定性错误不会被扩展自动重试；billing/quota 限额保持终态，没有明确分钟提示的订阅用量限额则按 15 分钟间隔轮询，最长 5 小时。输入上下文超限仍由 Pi compaction 处理。
+普通工具调用本来就会让 Pi 继续。正常文字结束、显式取消、认证/权限错误、安全拒绝和未知确定性错误不会被扩展自动重试；billing/quota 限额保持终态，没有明确分钟提示的订阅用量限额则按 10 分钟间隔轮询，最长 5 小时（放弃过的窗口之后为 5 小时 20 分）。输入上下文超限仍由 Pi compaction 处理。
 
 ## 四种恢复路径
 
@@ -64,11 +66,11 @@ Pi 原生 retry 在 `agent_before_settle` 之前运行。扩展在 `turn_end` �
 
 **带重置时间。** 例如 `You have hit your ChatGPT usage limit (plus plan). Try again in ~120 min.`：等待 120 分钟加 30 秒，再继续原任务。Pi 将 Codex 重置时间四舍五入到整分钟，`~` 值可能提前近 30 秒；增加余量也能避免 `~0 min.` 连续立即请求并耗尽预算。没有 `~` 的明确值只等待 N 分钟。也支持 `Retry in N mins/minutes`，不硬编码 API、登录方式或套餐。
 
-**不带重置时间。** 某些传输路径也会抛出同一个限额但不带重置时间（例如 Codex 流内错误 `Codex error: The usage limit has been reached`）。此时扩展会轮询：等待 15 分钟，继续原任务；若仍是同一错误，再等 15 分钟，直到 provider 恢复或 5 小时窗口（20 次）耗尽。轮询有独立上限，不计入 `--continuity-max-resumes`，但 `--continuity=false` 和 `--continuity-max-resumes=0` 会关闭它。时长为缺失、负数、非有限或不安全的无效格式时，走这条轮询路径。
+**不带重置时间。** 某些传输路径也会抛出同一个限额但不带重置时间（例如 Codex 流内错误 `Codex error: The usage limit has been reached`）。此时扩展会轮询：等待 10 分钟，继续原任务；若仍是同一错误，再等 10 分钟，直到 provider 恢复或 5 小时窗口（30 次）耗尽。provider 的用量窗口通常为 5 小时，所以首个窗口与其对齐；一旦某个窗口被放弃，后续窗口增加 20 分钟缓冲、使用 5 小时 20 分（32 次），避免在 provider 重置的同一刻停止轮询。轮询有独立上限，不计入 `--continuity-max-resumes`，但 `--continuity=false` 和 `--continuity-max-resumes=0` 会关闭它。时长为缺失、负数、非有限或不安全的无效格式时，走这条轮询路径。
 
 等待发生在仍有公开取消信号的 `turn_end`，阻止原生 retry 在限额恢复前提前请求；到期后先让原生恢复处理，否则在 `agent_before_settle` 请求下一轮。Escape/SDK abort、`/pi-continuity off`、新输入、session reset 或退出都会中断等待；直接通过 SDK 排队的输入最多 1 秒被检测。`/pi-continuity status` 显示剩余等待时间和轮询进度。必须保持 Pi 运行；重启或 reload 不恢复等待中的计时器。
 
-带提示的定时恢复计入 `--continuity-max-resumes` 总预算，但不占 stream 子预算；无提示的轮询由独立的 5 小时窗口限定。`--continuity-stream-retries=0` 不关闭二者，stream 的 10 秒上限也不会缩短它们。认证、安全和输入上下文错误仍不恢复。`insufficient_quota`、`quota exceeded`、`out of budget`、`billing`、`available balance` 仍为终态。
+带提示的定时恢复计入 `--continuity-max-resumes` 总预算，但不占 stream 子预算；无提示的轮询由独立的 5 小时窗口限定（放弃过的窗口之后为 5 小时 20 分）。`--continuity-stream-retries=0` 不关闭二者，stream 的 10 秒上限也不会缩短它们。认证、安全和输入上下文错误仍不恢复。`insufficient_quota`、`quota exceeded`、`out of budget`、`billing`、`available balance` 仍为终态。
 
 ### Tool-call tail
 
@@ -100,7 +102,7 @@ pi --continuity-tool-tail=false
 | `--continuity-checkpoint-max-chars` | `12000` | 活跃 checkpoint 中最多合并的可读 partial 字符数，硬上限 64000。`0` 不复制 partial 文本/思考。 |
 | `--continuity-tool-tail` | `true` | 是否恢复停在 tool call 的任务。 |
 
-布尔参数必须显式写值，例如 `--continuity=false`，不是 presence-only flag。无重置时间的用量限额轮询有独立上限（5 小时内最多 20 次）；用 `--continuity=false` 或 `--continuity-max-resumes=0` 可关闭。
+布尔参数必须显式写值，例如 `--continuity=false`，不是 presence-only flag。无重置时间的用量限额轮询有独立上限（5 小时内最多 30 次；某个窗口被放弃后为 5 小时 20 分内最多 32 次）；用 `--continuity=false` 或 `--continuity-max-resumes=0` 可关闭。
 
 ```bash
 pi --continuity-max-resumes 20 --continuity-stream-retries 12
@@ -143,7 +145,7 @@ npm pack --dry-run
 pi -e .
 ```
 
-测试使用真实 Pi `AgentSession` 和内存 faux provider，不调用真实模型、不需要 API key、不产生付费请求。测试覆盖截断形态、原生 retry 顺序、6 次 fallback、分段等待、虚拟 5 小时限额等待、15 分钟无提示轮询及其 5 小时放弃窗口、重置时间取整、取消、排队输入、上下文修复、工具安全和 package loading；当前开发依赖固定为 Pi 1.1.0。
+测试使用真实 Pi `AgentSession` 和内存 faux provider，不调用真实模型、不需要 API key、不产生付费请求。测试覆盖截断形态、原生 retry 顺序、6 次 fallback、分段等待、虚拟 5 小时限额等待、10 分钟无提示轮询及其 5 小时放弃窗口与延长窗口、重置时间取整、取消、排队输入、上下文修复、工具安全和 package loading；当前开发依赖固定为 Pi 1.4.0。
 
 图片和动画是机制 storyboard，不是 TUI 录屏或模型 benchmark。生成方法见 [docs/assets.md](assets.md)。
 
