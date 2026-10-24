@@ -1,6 +1,6 @@
 {
   "name": "pi-continuity",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Pi coding-agent extension that recovers truncated turns, failed streams, empty responses, and terminal tool-call tails through public session boundaries.",
   "type": "module",
   "license": "MIT",

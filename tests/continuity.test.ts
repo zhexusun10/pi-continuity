@@ -47,6 +47,29 @@ for (const error of [
   });
 }
 
+test("certificate validation failures are terminal, not transient TLS retries", () => {
+  // Synthetic strings; no live Pi reproduction.
+  for (const errorMessage of [
+    "TLS handshake failed: certificate has expired",
+    "unable to verify the first certificate",
+    "self signed certificate",
+    "self-signed certificate in certificate chain",
+    "certificate verify failed",
+    "SSL: CERTIFICATE_VERIFY_FAILED",
+    "x509: certificate signed by unknown authority",
+    "x509: certificate has expired or is not yet valid",
+    "Hostname/IP does not match certificate's altnames",
+    "Error: CERT_HAS_EXPIRED",
+    "Error: DEPTH_ZERO_SELF_SIGNED_CERT",
+  ]) {
+    assert.equal(recoveryReason(fauxAssistantMessage("", { stopReason: "error", errorMessage })), undefined);
+  }
+  // The broad transport patterns stay transient: a reset connection retries, and a
+  // TLS handshake failure without a certificate cause is still retryable.
+  assert.equal(recoveryReason(fauxAssistantMessage("", { stopReason: "error", errorMessage: "read ECONNRESET" })), "stream-error");
+  assert.equal(recoveryReason(fauxAssistantMessage("", { stopReason: "error", errorMessage: "TLS handshake timeout" })), "stream-error");
+});
+
 test("explicit output-cap errors are not mistaken for input-context overflow", () => {
   assert.equal(recoveryReason(fauxAssistantMessage("", { stopReason: "error", errorMessage: "Response truncated after it reached max_output_tokens" })), "truncation");
   assert.equal(recoveryReason(fauxAssistantMessage("", { stopReason: "error", errorMessage: "max_completion_tokens reached" })), "truncation");

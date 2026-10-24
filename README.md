@@ -21,7 +21,7 @@ These benchmark observations motivate a concrete engineering question: when a re
 pi install npm:pi-continuity
 ```
 
-`pi-continuity@0.3.0` is the latest npm release and supports Pi 1.4.0.
+`pi-continuity@0.3.1` is the latest npm release and supports Pi 1.4.0.
 
 For a GitHub source install:
 

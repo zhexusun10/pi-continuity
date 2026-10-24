@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.3.1] - 2026-10-24
+
+### Fixed
+
+- Treat TLS certificate validation failures as terminal instead of transient, even when wrapped as `TLS handshake failed: ...`. The broad TLS/network patterns previously matched `TLS handshake failed: certificate has expired`, which retried a deterministic error. A reset connection (`ECONNRESET`) and a TLS handshake failure without a certificate cause remain retryable.
+
 ## [0.3.0] - 2026-10-23
 
 ### Changed

@@ -16,7 +16,7 @@
 pi install npm:pi-continuity
 ```
 
-`pi-continuity@0.3.0` 是最新 npm 版本，支持 Pi 1.4.0。
+`pi-continuity@0.3.1` 是最新 npm 版本，支持 Pi 1.4.0。
 
 也可以通过 GitHub 安装：
 

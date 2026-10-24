@@ -29,6 +29,17 @@ const PERMANENT_ERROR = [
   /invalid.?api.?key|permission.?denied/i,
   /content.?filter|safety|policy.?violation/i,
   /invalid.?request|invalid.?argument|invalid.?param|not[\s_-]+found|not_found|not.?supported/i,
+  // Certificate validation is deterministic even when wrapped as "TLS handshake
+  // failed: ...": retrying the same request against the same expired or untrusted
+  // certificate cannot succeed. Checked before the broad TLS/network transient
+  // patterns so it does not trigger paid retries.
+  /certificate[\s\S]{0,80}?\b(?:expired|not yet valid|revoked|untrusted|self.?signed|unknown authority|altname|hostname mismatch)/i,
+  /(?:self.?signed|untrusted) certificate/i,
+  /unable to verify (?:the )?(?:first|leaf|server) certificate/i,
+  /certificate.?verify.?failed/i,
+  /hostname\/ip does not match certificate/i,
+  /\b(?:CERT_HAS_EXPIRED|CERT_NOT_YET_VALID|CERT_REVOKED|CERT_UNTRUSTED|DEPTH_ZERO_SELF_SIGNED_CERT|SELF_SIGNED_CERT_IN_CHAIN|UNABLE_TO_VERIFY_LEAF_SIGNATURE|ERR_TLS_CERT_ALTNAME_INVALID)\b/,
+  /\bx509:/i,
 ];
 const TERMINAL_ACCOUNT_ERROR = /insufficient_quota|quota.?exceeded|out of budget|billing|available balance/i;
 const USAGE_LIMIT_ERROR = /usage.?limit/i;
