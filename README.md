@@ -5,7 +5,7 @@
 [![CI](https://github.com/zhexusun10/pi-continuity/actions/workflows/ci.yml/badge.svg)](https://github.com/zhexusun10/pi-continuity/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/pi-continuity)](https://www.npmjs.com/package/pi-continuity)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Pi 1.4.0](https://img.shields.io/badge/tested-Pi%201.4.0-blue.svg)](https://pi.dev)
+[![Pi 1.5.0](https://img.shields.io/badge/tested-Pi%201.5.0-blue.svg)](https://pi.dev)
 
 [简体中文](docs/README.zh-CN.md) · [Design](docs/design.md) · [Evidence](docs/evidence.md) · [Source](extensions/index.ts)
 
@@ -21,7 +21,7 @@ These benchmark observations motivate a concrete engineering question: when a re
 pi install npm:pi-continuity
 ```
 
-`pi-continuity@0.3.1` is the latest npm release and supports Pi 1.4.0.
+`pi-continuity@0.4.0` is the latest npm release and supports Pi 1.5.0.
 
 For a GitHub source install:
 
@@ -31,20 +31,20 @@ pi install git:github.com/zhexusun10/pi-continuity
 
 Then start a new Pi process or run `/reload` in an existing session. The package does not patch Pi, call providers directly, or install runtime dependencies.
 
-Requires **Pi 1.0.1+ with actionable session boundaries** and Node.js 22.19+. Validated against the latest **Pi 1.4.0**; the development dependencies are pinned to 1.4.0. It works in the Pi CLI and in SDK applications that load and bind the extension to the same `AgentSession` used for the model run.
+Requires **Pi 1.0.1+ with actionable session boundaries** and Node.js 22.19+. Validated against the latest **Pi 1.5.0**; the development dependencies are pinned to 1.5.0. It works in the Pi CLI and in SDK applications that load and bind the extension to the same `AgentSession` used for the model run.
 
 ## What changes?
 
 | When Pi would stop | pi-continuity |
 | --- | --- |
-| `stopReason: "length"`: text, reasoning-only, empty, mixed, or tool-call output | Removes the interrupted assistant protocol from the next model projection, preserves bounded readable partial context when useful, and requests one next model turn at `turn_end`. |
-| A failed provider stream, including `errorMessage: "terminated"` or `"TypeError: terminated"` | Lets Pi's native session retry run first. After native recovery is exhausted, omits the failed assistant, preserves a bounded checkpoint when useful, and requests another model turn with staged delays. |
+| `stopReason: "length"`: text, reasoning-only, empty, mixed, or tool-call output | Removes the interrupted assistant protocol from the next model projection and requests one next model turn at `turn_end`. Partial text/reasoning is not injected. |
+| A failed provider stream, including `errorMessage: "terminated"` or `"TypeError: terminated"` | Lets Pi's native session retry run first. After native recovery is exhausted, omits the failed assistant and requests another model turn with staged delays. No checkpoint or hidden prompt is injected. |
 | Provider usage limit with `Try again in ~N min.` (including ChatGPT/Codex login) | Waits the advertised minutes plus a 30-second rounding margin for `~`, then continues the same task through the public boundary. Applies to any provider/login with this error text. |
 | Provider usage limit **without** a reset time (for example `Codex error: The usage limit has been reached`) | Polls every 10 minutes for up to 5 hours (30 attempts), then stops and leaves the raw failure in history. Once a window has been given up, later windows use 5 h 20 min (32 attempts) so the poll does not stop at the same instant the provider resets. Polling has its own bound and does not consume `--continuity-max-resumes`; `--continuity=false` or `--continuity-max-resumes=0` disables it. |
 | Successful but empty output | Omits the empty assistant response and requests another model turn using the bounded stream-recovery budget. |
 | A run that ends with a tool call after the tool result | Keeps the completed tool result and requests one next model turn at `agent_before_settle`; it does not add a synthetic user instruction or rerun the tool. |
 
-The extension uses Pi's public session boundary API: `context_edit` repairs the next model projection and `continue: true` asks the `AgentSession` to call its next model turn. It does not inject a synthetic `Continue` user message for every retry. A hidden checkpoint is added only when readable partial progress or an interrupted-tool note is useful.
+The extension uses Pi's public session boundary API: `context_edit` repairs the next model projection and `continue: true` asks the `AgentSession` to call its next model turn. It does not inject a synthetic `Continue` user message, a hidden checkpoint, or any other model-visible prompt. Partial text/reasoning from the interrupted response is deliberately dropped; only append-only session metadata (which does not enter model context) is added for recovery accounting.
 
 An ordinary tool call already causes Pi to continue. The extension does not add an extra turn to every tool call. Normal final text, explicit aborts, authentication errors, safety rejections, and unknown deterministic errors are not retried. Billing/quota limits remain terminal; subscription usage limits without explicit retry guidance are polled every 10 minutes for at most 5 hours (5 h 20 min after a give-up). Input-context errors remain Pi's compaction responsibility. Clearly reported output-cap errors are supported when a provider represents them as `error` instead of `length`.
 
@@ -54,14 +54,15 @@ For an interrupted assistant response, the extension reads the projected session
 
 1. It identifies the response boundary from the assistant stop reason and the projected content.
 2. It appends `context_edit` entries for the interrupted assistant and synthetic results that cannot be replayed safely.
-3. It optionally stores readable text/reasoning as a quoted, bounded checkpoint. Tool arguments, signatures, response IDs, and redacted reasoning are excluded.
-4. It returns `continue: true`. Pi commits the boundary drafts and starts the next model turn.
+3. It returns `continue: true`. Pi commits the boundary drafts and starts the next model turn.
 
-Pi's native retry runs before `agent_before_settle`. The extension saves a checkpoint at `turn_end` so native retry can still use readable progress after Pi omits the failed assistant from model context. If native recovery is exhausted, the extension uses the same public boundary mechanism for its fallback.
+No checkpoint text, quoted partial, or hidden instruction from the interrupted response is added to model context. The next request sees the original task and any completed tool results, with broken protocol blocks omitted. Reasoning in earlier completed assistant turns is not stripped by this extension.
 
-A truncated tool call is never executed by this extension. Pi's core handles truncated tool calls safely; the next model turn receives a note that the interrupted call was not executed and must be re-issued with complete arguments. A completed tool result remains available for tool-tail recovery.
+Pi's native retry runs before `agent_before_settle`. The extension does not save partial context for it. If native recovery is exhausted, the extension uses the same public boundary mechanism for its fallback.
 
-The session history is append-only. `context_edit` changes model projection, not raw history or usage records. Recovery markers are plain session metadata and do not become model messages. Checkpoints are model context and may contain readable reasoning from the finalized provider response.
+A truncated tool call is never executed by this extension and is omitted from the next model projection. Pi's core handles truncated tool calls safely; the model must re-issue any still-needed work with complete arguments. A completed tool result remains available for tool-tail recovery.
+
+The session history is append-only. `context_edit` changes model projection, not raw history or usage records. Recovery markers are plain session metadata and do not become model messages. The extension does not persist partial text/reasoning as model context, but raw session history may still contain sensitive content.
 
 ## Usage limits
 
@@ -82,7 +83,7 @@ Timed-limit continuations count toward `--continuity-max-resumes`, not the strea
 /pi-continuity on
 ```
 
-`status` reports recovery counts for the current or last user request without printing partial content. Toggling applies to the current loaded session; `/reload` restores CLI defaults. Turning the extension off stops future extension recovery but does not remove persisted history or disable Pi's native retry setting.
+`status` reports recovery counts for the current or last user request without printing partial content. Toggling applies to the current loaded session; `/reload` restores CLI defaults. Turning the extension off stops future extension recovery but does not remove persisted history or disable Pi's native retry setting. Legacy pi-continuity checkpoint messages are still omitted from model context when recovery is off; raw history is unchanged.
 
 | CLI flag | Default | Meaning |
 | --- | ---: | --- |
@@ -90,7 +91,7 @@ Timed-limit continuations count toward `--continuity-max-resumes`, not the strea
 | `--continuity-max-resumes` | `16` | Maximum extension-scheduled model turns per actual user request. `0` disables extension recovery; `unlimited` removes this total cap. |
 | `--continuity-stream-retries` | `12` | Extra stream/empty-response recoveries after native retry. The default schedule is three attempts at 5 seconds, then nine attempts at 10 seconds. `0` disables this fallback. |
 | `--continuity-stream-delay-ms` | `5000` | Base delay for extra stream/empty-response recoveries. Attempts 1–3 use this value; later attempts use 2x, capped at 10 seconds. |
-| `--continuity-checkpoint-max-chars` | `12000` | Maximum readable partial context merged into the active checkpoint. Hard maximum: `64000`. `0` disables copied partial text/reasoning. |
+| `--continuity-checkpoint-max-chars` | `12000` | **Deprecated no-op.** Checkpoint/prompt context is never injected. The old 64000 upper bound is still validated for script compatibility. |
 | `--continuity-tool-tail` | `true` | Recover a settled tool-call ending. Set `false` for intentionally terminal structured-output or handoff tools. |
 
 Boolean flags take explicit values such as `--continuity=false`; they are not presence-only flags. Usage-limit polling is bounded separately at 30 attempts within 5 hours (32 attempts within 5 h 20 min once a window has been given up); use `--continuity=false` or `--continuity-max-resumes=0` to disable it.
@@ -98,7 +99,6 @@ Boolean flags take explicit values such as `--continuity=false`; they are not pr
 ```bash
 pi --continuity-max-resumes 20 --continuity-stream-retries 12
 pi --continuity-stream-delay-ms 5000
-pi --continuity-checkpoint-max-chars 8000
 pi --continuity-tool-tail=false
 ```
 
@@ -120,7 +120,7 @@ Budgets reset on an actual new user request, not on every `agent_start` emitted 
 - A model can still repeat work, miss context, or stop incorrectly. Check task results independently.
 - Provider-specific error wording differs. The classifier covers Pi's retry classifier and common HTTP/transport failures while remaining conservative for unknown deterministic errors.
 - The extension cannot recover a killed process, a provider stream that never finalizes, an unbounded tool, content the provider never exposed, or exhausted credits.
-- Readable checkpoints are persisted by Pi as model context. Treat session files as sensitive.
+- The extension does not inject partial text/reasoning into model context. Raw session history may still contain sensitive content; treat session files as sensitive.
 - Other extensions can replace boundary drafts or continuation decisions. Load order is a composition boundary, especially for redaction.
 
 The benchmark figures above are the paper's Terminal-Bench 4.0 results. This repository's deterministic suite and in-memory AgentSession tests validate extension control flow and package loading; the source attribution and methodology are collected in [evidence.md](docs/evidence.md).

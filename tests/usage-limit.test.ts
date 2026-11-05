@@ -3,7 +3,8 @@ import { getEventListeners } from "node:events";
 import test, { type TestContext } from "node:test";
 import { clearTimeout as nodeClearTimeout, setTimeout as nodeSetTimeout } from "node:timers";
 import { setImmediate } from "node:timers/promises";
-import { Type, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import {
   APPROXIMATE_RESET_BUFFER_MS, DEFAULT_OPTIONS, EXTENDED_USAGE_POLL_MAX_ATTEMPTS, EXTENDED_USAGE_POLL_WINDOW_MS,
   RecoveryBudget, USAGE_POLL_DELAY_MS, USAGE_POLL_MAX_ATTEMPTS, USAGE_POLL_WINDOW_MS, recoveryReason, usageLimitDelayMs,
@@ -195,7 +196,8 @@ for (const errorMessage of [
     await run;
     assert.equal(h.requests.length, 2);
     assert.equal(h.continuations().length, 1);
-    assert.match(allText(h.requests[1]!), /keep this plan/);
+    assert.equal(h.checkpoints().length, 0);
+    assert.doesNotMatch(allText(h.requests[1]!), /keep this plan/);
     assert.equal(h.events.filter((event) => event.type === "agent_settled").length, 1);
     assert.deepEqual(h.errors, []);
   });
@@ -213,12 +215,13 @@ test("guidance-less usage limits poll every 10 minutes until the provider recove
   assert.equal(h.requests.length, 1);
   clock.advance(1);
   await until(() => h.requests.length === 2 && clock.pending() > 0);
-  assert.match(allText(h.requests[1]!), /FIRST_PARTIAL/);
+  assert.doesNotMatch(allText(h.requests[1]!), /FIRST_PARTIAL/);
   clock.advance(USAGE_POLL_DELAY_MS);
   await run;
   assert.equal(h.requests.length, 3);
   assert.equal(h.continuations().length, 2);
-  assert.match(allText(h.requests[2]!), /SECOND_PARTIAL/);
+  assert.equal(h.checkpoints().length, 0);
+  assert.doesNotMatch(allText(h.requests[2]!), /FIRST_PARTIAL|SECOND_PARTIAL/);
   const raw = h.manager.getBranch().find((entry) => entry.type === "message" &&
     entry.message.role === "assistant" && entry.message.stopReason === "error");
   assert.ok(raw?.type === "message" && raw.message.role === "assistant");
@@ -385,8 +388,8 @@ test("timed recovery preserves earlier boundary redactions and entries", async (
   clock.advance(5 * 60_000 + APPROXIMATE_RESET_BUFFER_MS);
   await run;
   assert.equal(h.requests.length, 2);
-  assert.doesNotMatch(allText(h.requests[1]!), /PRIVATE_SECRET/);
-  assert.match(allText(h.requests[1]!), /\[redacted\]/);
+  assert.doesNotMatch(allText(h.requests[1]!), /PRIVATE_SECRET|\[redacted\]/);
+  assert.equal(h.checkpoints().length, 0);
   assert.ok(h.manager.getBranch().some((entry) => entry.type === "custom" && entry.customType === "other-extension"));
   assert.deepEqual(h.errors, []);
 });
@@ -434,8 +437,8 @@ test("timed recovery preserves raw failure/usage and excludes partial tool argum
   clock.advance(5 * 60_000 + APPROXIMATE_RESET_BUFFER_MS);
   await run;
   assert.equal(executed, 0);
-  assert.match(allText(h.requests[1]!), /unfinished reasoning/);
-  assert.match(allText(h.requests[1]!), /NOT executed/);
+  assert.equal(h.checkpoints().length, 0);
+  assert.doesNotMatch(allText(h.requests[1]!), /unfinished reasoning|NOT executed/);
   assert.doesNotMatch(JSON.stringify(h.requests[1]), /OPAQUE_SIGNATURE|UNSAFE_ARGUMENTS/);
   const original = h.manager.getBranch().find((entry) => entry.type === "message" &&
     entry.message.role === "assistant" && entry.message.stopReason === "error");

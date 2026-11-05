@@ -16,7 +16,7 @@
 pi install npm:pi-continuity
 ```
 
-`pi-continuity@0.3.1` 是最新 npm 版本，支持 Pi 1.4.0。
+`pi-continuity@0.4.0` 是最新 npm 版本，支持 Pi 1.5.0。
 
 也可以通过 GitHub 安装：
 
@@ -26,20 +26,20 @@ pi install git:github.com/zhexusun10/pi-continuity
 
 安装后重新启动 Pi，或在当前会话执行 `/reload`。扩展不修改 Pi 文件、不直接访问 provider、不安装运行时依赖。
 
-需要具有可操作 session boundary 的 **Pi 1.0.1+** 和 Node.js 22.19+。已针对最新的 **Pi 1.4.0** 验证，开发依赖固定为 1.4.0。它适用于 Pi CLI，也适用于正确加载并绑定扩展的 `AgentSession` SDK 程序。
+需要具有可操作 session boundary 的 **Pi 1.0.1+** 和 Node.js 22.19+。已针对最新的 **Pi 1.5.0** 验证，开发依赖固定为 1.5.0。它适用于 Pi CLI，也适用于正确加载并绑定扩展的 `AgentSession` SDK 程序。
 
 ## 它解决什么问题？
 
 | Pi 原本准备停止的情况 | pi-continuity 的处理 |
 | --- | --- |
-| `stopReason: "length"`：文字、纯思考、空输出、混合内容或工具调用 | 从下一次模型投影中移除不完整 assistant 协议；有可读进展时保存有界 partial，并在 `turn_end` 请求下一轮模型请求。 |
-| provider stream 失败，包括 `errorMessage: "terminated"` / `"TypeError: terminated"` | 先让 Pi 原生 session retry 处理；原生恢复耗尽后，移除失败 assistant，必要时保存有界 checkpoint，再按分段等待策略请求下一轮。 |
+| `stopReason: "length"`：文字、纯思考、空输出、混合内容或工具调用 | 从下一次模型投影中移除不完整 assistant 协议，并在 `turn_end` 请求下一轮模型请求；不注入 partial 文本/思考。 |
+| provider stream 失败，包括 `errorMessage: "terminated"` / `"TypeError: terminated"` | 先让 Pi 原生 session retry 处理；原生恢复耗尽后，移除失败 assistant，再按分段等待策略请求下一轮；不注入 checkpoint 或隐藏提示词。 |
 | 用量限额错误含 `Try again in ~N min.`，包括 ChatGPT/Codex 登录 | 等待 N 分钟，并对 `~` 近似值增加 30 秒取整余量，再通过公开 boundary 继续原任务；不限定 provider、套餐或登录方式。 |
 | 用量限额错误**不含**重置时间（例如 Codex 流内错误 `Codex error: The usage limit has been reached`） | 每 10 分钟轮询一次，最多持续 5 小时（30 次），然后停止并把原始失败保留在历史中。某个窗口放弃后，后续窗口延长到 5 小时 20 分（32 次），避免在 provider 重置的同一刻停止轮询。轮询有独立上限，不计入 `--continuity-max-resumes`；`--continuity=false` 或 `--continuity-max-resumes=0` 可关闭。 |
 | 成功但为空的 assistant 输出 | 移除空 assistant，并使用 stream recovery 预算请求下一轮。 |
 | 工具结果已经完成但任务停在 tool call | 保留已完成的 tool result，在 `agent_before_settle` 请求下一轮；不添加合成 user 指令，也不重复执行工具。 |
 
-扩展使用 Pi 提供的公开 session boundary API：通过 `context_edit` 修复下一次模型请求的投影，通过 `continue: true` 让 `AgentSession` 发起下一轮。它不会为每次 retry 添加隐藏的 `Continue` user 文本。只有需要传递可读 partial 或说明中断工具未执行时，才添加隐藏 checkpoint。
+扩展使用 Pi 提供的公开 session boundary API：通过 `context_edit` 修复下一次模型请求的投影，通过 `continue: true` 让 `AgentSession` 发起下一轮。它不会注入 `Continue` user 文本、隐藏 checkpoint，或任何其他模型可见的提示词。被中断响应中的 partial 文本/思考会被直接丢弃；只追加不进入模型上下文的 session 元数据用于恢复计数。已完成的历史 assistant reasoning 不会被这个扩展全局删除。
 
 普通工具调用本来就会让 Pi 继续。正常文字结束、显式取消、认证/权限错误、安全拒绝和未知确定性错误不会被扩展自动重试；billing/quota 限额保持终态，没有明确分钟提示的订阅用量限额则按 10 分钟间隔轮询，最长 5 小时（放弃过的窗口之后为 5 小时 20 分）。输入上下文超限仍由 Pi compaction 处理。
 
@@ -47,13 +47,13 @@ pi install git:github.com/zhexusun10/pi-continuity
 
 ### Output truncation
 
-扩展保留原始 session history，但用 `context_edit` 让不完整 assistant 和相关合成结果不再进入下一次模型请求。可读文字和未加密 reasoning 会被 JSON 引用为有界 checkpoint；工具参数、签名、response ID 和 redacted reasoning 不会复制。
+扩展保留原始 session history，但用 `context_edit` 让不完整 assistant 和相关合成结果不再进入下一次模型请求。不会把可读文字、reasoning、工具参数、签名或 response ID 注入下一次请求。
 
-Pi 核心负责保证截断 tool call 不会被执行。下一轮会知道中断工具没有执行，必要时必须重新生成完整参数。
+Pi 核心负责保证截断 tool call 不会被执行，并把它从下一次模型投影中移除。模型需要根据原始任务重新生成仍然需要的完整调用。
 
 ### Stream recovery
 
-Pi 原生 retry 在 `agent_before_settle` 之前运行。扩展在 `turn_end` 保存 partial checkpoint，使原生 retry 在省略失败 assistant 后仍能看到可读进展。原生 retry 耗尽后，扩展通过相同的公开 boundary 机制修复投影并请求下一轮。
+Pi 原生 retry 在 `agent_before_settle` 之前运行。扩展不为原生 retry 保存 partial 上下文。原生 retry 耗尽后，扩展通过相同的公开 boundary 机制修复投影并请求下一轮。
 
 默认额外 fallback 为 6 次：
 
@@ -91,7 +91,7 @@ pi --continuity-tool-tail=false
 /pi-continuity on
 ```
 
-`status` 显示当前或上一条真实用户请求的恢复次数，不打印 partial 内容。开关作用于当前加载的 session；`/reload` 后恢复 CLI 默认值。
+`status` 显示当前或上一条真实用户请求的恢复次数，不打印 partial 内容。开关作用于当前加载的 session；`/reload` 后恢复 CLI 默认值。即使关闭扩展，旧的 pi-continuity checkpoint 消息仍会从模型上下文中移除；原始 history 不变。
 
 | 参数 | 默认 | 含义 |
 | --- | ---: | --- |
@@ -99,7 +99,7 @@ pi --continuity-tool-tail=false
 | `--continuity-max-resumes` | `16` | 每条真实用户请求最多由扩展安排 16 次模型轮次。`0` 禁用；`unlimited` 移除总上限。 |
 | `--continuity-stream-retries` | `12` | 原生 retry 之后最多补 12 次 stream/空响应恢复；默认 3 次 5 秒，再 9 次 10 秒。`0` 只禁用这两种 fallback，不关闭定时限额恢复。 |
 | `--continuity-stream-delay-ms` | `5000` | stream/空响应额外恢复的基础等待毫秒数；第 1～3 次使用该值，之后使用 2 倍，最多 10 秒。 |
-| `--continuity-checkpoint-max-chars` | `12000` | 活跃 checkpoint 中最多合并的可读 partial 字符数，硬上限 64000。`0` 不复制 partial 文本/思考。 |
+| `--continuity-checkpoint-max-chars` | `12000` | **已弃用 no-op。** 不再注入 checkpoint/提示词上下文；仍保留旧的 64000 上限校验以兼容脚本。 |
 | `--continuity-tool-tail` | `true` | 是否恢复停在 tool call 的任务。 |
 
 布尔参数必须显式写值，例如 `--continuity=false`，不是 presence-only flag。无重置时间的用量限额轮询有独立上限（5 小时内最多 30 次；某个窗口被放弃后为 5 小时 20 分内最多 32 次）；用 `--continuity=false` 或 `--continuity-max-resumes=0` 可关闭。
@@ -107,7 +107,6 @@ pi --continuity-tool-tail=false
 ```bash
 pi --continuity-max-resumes 20 --continuity-stream-retries 12
 pi --continuity-stream-delay-ms 5000
-pi --continuity-checkpoint-max-chars 8000
 pi --continuity-tool-tail=false
 ```
 
@@ -129,7 +128,7 @@ pi --continuity-tool-tail=false
 - 模型仍可能重复操作、遗漏上下文或错误停止；任务结果需要独立验证。
 - 不同 provider 的错误文案不同。分类器覆盖 Pi 自带分类和常见 HTTP/传输错误，但对未知确定性错误保持保守。
 - 进程被杀、永久挂起的 stream、无限阻塞的工具、provider 从未暴露的内容和耗尽的 credits 无法恢复。
-- checkpoint 会由 Pi 持久化为模型上下文，session 文件可能包含可读 reasoning。
+- 扩展不会把 partial 文本/思考注入模型上下文；原始 session history 仍可能包含敏感内容，请按敏感文件处理。
 - 其他扩展可以替换 boundary drafts 或 continuation decision；扩展加载顺序是组合边界，尤其要注意脱敏扩展。
 
 研究和源码依据见 [docs/evidence.md](evidence.md)。上面的 benchmark 数据来自论文的 Terminal-Bench 4.0 分析；仓库测试则验证本扩展的控制流和 package loading。
@@ -145,7 +144,7 @@ npm pack --dry-run
 pi -e .
 ```
 
-测试使用真实 Pi `AgentSession` 和内存 faux provider，不调用真实模型、不需要 API key、不产生付费请求。测试覆盖截断形态、原生 retry 顺序、6 次 fallback、分段等待、虚拟 5 小时限额等待、10 分钟无提示轮询及其 5 小时放弃窗口与延长窗口、重置时间取整、取消、排队输入、上下文修复、工具安全和 package loading；当前开发依赖固定为 Pi 1.4.0。
+测试使用真实 Pi `AgentSession` 和内存 faux provider，不调用真实模型、不需要 API key、不产生付费请求。测试覆盖截断形态、原生 retry 顺序、12 次 fallback（3 次 5 秒 + 9 次 10 秒）、分段等待、虚拟 5 小时限额等待、10 分钟无提示轮询及其 5 小时放弃窗口与延长窗口、重置时间取整、取消、排队输入、上下文修复、工具安全和 package loading；当前开发依赖固定为 Pi 1.5.0。
 
 图片和动画是机制 storyboard，不是 TUI 录屏或模型 benchmark。生成方法见 [docs/assets.md](assets.md)。
 

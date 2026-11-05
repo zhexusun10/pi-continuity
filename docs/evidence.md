@@ -28,7 +28,7 @@ All source links below are pinned to that revision, not moving `main`.
 
 [`packages/agent/src/agent-loop.ts`](https://github.com/earendil-works/pi/blob/04b97ef0007ad2d55615d0a545163387a701fc67/packages/agent/src/agent-loop.ts#L258-L282) rejects tool calls from a `length` response with synthetic errors instead of executing potentially incomplete arguments. The tool batch then naturally continues. This is the fix identified as commit `351efc828` / PR [#6285](https://github.com/earendil-works/pi/pull/6285).
 
-pi-continuity relies on this core safety behavior, never executes tools itself, and keeps the unexecuted-call explanation in an optional sanitized checkpoint before requesting the next boundary turn.
+pi-continuity relies on this core safety behavior, never executes tools itself, omits the interrupted protocol from the next model projection, and requests the next boundary turn without injecting any checkpoint or hidden prompt.
 
 ### 2. Pure text/reasoning length stops still have an exit path
 
@@ -50,7 +50,7 @@ Our integration tests reproduce the at-cap baseline with compaction enabled, the
 
 The public [`isRetryableAssistantError()` classifier](https://github.com/earendil-works/pi/blob/04b97ef0007ad2d55615d0a545163387a701fc67/packages/ai/src/utils/retry.ts) explicitly recognizes `terminated`. A finalized `stopReason: "error"` with that message follows native-first recovery; `stopReason: "aborted"` and explicit cancellation remain terminal.
 
-This extension saves readable fragments as safe quoted text before native retry omission, reuses the native classifier with additional premature-stream patterns, and schedules fallback only at `agent_before_settle`. It does not replace native retry settings or pretend there was no failed response.
+This extension omits readable fragments from the next projection rather than replaying them, reuses the native classifier with additional premature-stream patterns, and schedules fallback only at `agent_before_settle`. It does not replace native retry settings or pretend there was no failed response.
 
 ### 4. A tool may intentionally stop the loop
 
@@ -76,10 +76,10 @@ The README's PNG and animated GIF/MP4 are **mechanism storyboards**, illustratin
 
 ## Existing implementation validation
 
-- Deterministic unit tests for detection, budgets, quoted partial preservation, and cancellation/backoff.
-- The 138-test pre-release suite passed against the **published Pi 1.0.3 SDK**; the current 171-test suite passes against **Pi 1.4.0**, now the pinned development version. Integration tests use a real `AgentSession` and Pi's in-memory faux provider. No real model APIs or credentials are used.
-- Explicit `terminated` / `TypeError: terminated` fixtures in `tests/terminated.test.ts` cover empty/partial responses, native-first retry, exhausted-native fallback, protocol safety, budgets, cancellation, and queued steering input.
-- `tests/usage-limit.test.ts` uses a virtual clock to cover minute extraction, five-hour reset waits, exact and approximate zero-minute guidance, native 429 retry ordering, cancellation, queued input, total budgets, and protocol-safe partial context across provider/login error wording, plus the 10-minute guidance-less poll, its 5-hour give-up, the extended 5 h 20 min give-up after an exhausted window, and its independence from the resume cap.
+- Deterministic unit tests for detection, budgets, projection omission, and cancellation/backoff.
+- The 138-test pre-release suite passed against the **published Pi 1.0.3 SDK**; the current 172-test suite passes against **Pi 1.5.0**, now the pinned development version. Integration tests use a real `AgentSession` and Pi's in-memory faux provider. No real model APIs or credentials are used.
+- Explicit `terminated` / `TypeError: terminated` fixtures in `tests/terminated.test.ts` cover empty/partial responses, native-first retry, exhausted-native fallback, no-checkpoint projection safety, budgets, cancellation, and queued steering input.
+- `tests/usage-limit.test.ts` uses a virtual clock to cover minute extraction, five-hour reset waits, exact and approximate zero-minute guidance, native 429 retry ordering, cancellation, queued input, total budgets, and no-checkpoint projection safety across provider/login error wording, plus the 10-minute guidance-less poll, its 5-hour give-up, the extended 5 h 20 min give-up after an exhausted window, and its independence from the resume cap.
 - Isolated offline RPC installation/command-load verification.
 
 These validate the extension's control flow and package loading. The paper's Terminal-Bench 4.0 results provide the benchmark evidence for the underlying recovery problem; a separate real-model comparison would measure this package's task outcomes.

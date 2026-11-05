@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.4.0] - 2026-11-05
+
+### Changed
+
+- Validate and pin the development dependencies to **Pi 1.5.0**; the 172-test suite, `npm run check`, and offline load verification pass against 1.5.0.
+- Removed hidden checkpoint/prompt injection. Recovery now uses only append-only `context_edit` projection omissions, `continue: true` boundary decisions, and non-context `custom` metadata. Interrupted partial text/reasoning is intentionally dropped instead of being replayed as a model-visible prompt.
+- Legacy `pi-continuity-checkpoint` and any `pi-continuity` custom messages are always omitted from model context, including when recovery is disabled or flags fail closed. Omission wins over a prior context replacement so the boundary remains runnable, while already-omitted targets are not edited twice.
+- `--continuity-checkpoint-max-chars` and `checkpointMaxChars` remain accepted for compatibility but are deprecated no-ops; the flag still validates its old upper bound. The prompt-building helper `checkpointContent` was removed; the deprecated partial helpers (`readablePartial`, `limitPartial`, `mergePartial`) remain for API compatibility but are not used by the extension.
+
 ## [0.3.1] - 2026-10-24
 
 ### Fixed

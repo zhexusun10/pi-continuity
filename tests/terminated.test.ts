@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Type, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { CONTINUATION_TYPE } from "../lib/continuity.ts";
 import { allText, createHarness } from "./harness.ts";
 
@@ -8,7 +9,7 @@ const terminated = (text = "partial plan") =>
   fauxAssistantMessage(text, { stopReason: "error", errorMessage: "terminated" });
 
 for (const errorMessage of ["terminated", "TypeError: terminated"]) {
-  test(`${errorMessage} fallback preserves safe partial context and raw failure history`, async (t) => {
+  test(`${errorMessage} fallback recovers without injecting partial context and preserves raw failure history`, async (t) => {
     let executed = 0;
     const h = await createHarness({ tools: [{
       name: "finish", label: "Finish", description: "Test tool", parameters: Type.Object({}),
@@ -34,9 +35,9 @@ for (const errorMessage of ["terminated", "TypeError: terminated"]) {
     assert.equal(h.events.filter((event) => event.type === "agent_settled").length, 1);
     assert.equal(h.events.at(-1)?.type, "agent_settled");
     const next = h.requests[1]!;
-    assert.match(allText(next), /unfinished reasoning.*partial answer/s);
-    assert.match(allText(next), /NOT executed/);
+    assert.doesNotMatch(allText(next), /unfinished reasoning|partial answer|NOT executed/);
     assert.doesNotMatch(JSON.stringify(next), /OPAQUE_SIGNATURE|REDACTED_THINKING|ENCRYPTED|RESPONSE_ITEM_ID|UNSAFE_ARGUMENT/);
+    assert.equal(h.checkpoints().length, 0);
     assert.equal(next.some((message) => message.role === "toolResult" ||
       (message.role === "assistant" && message.stopReason === "error")), false);
     const original = h.manager.getBranch().find((entry) => entry.type === "message" &&
@@ -91,10 +92,9 @@ test("terminated fallback runs only after native retries are exhausted", async (
   const fallback = h.events.findIndex((event) => event.type === "entry_appended" &&
     event.entry.type === "custom" && event.entry.customType === CONTINUATION_TYPE);
   assert.ok(nativeEnd >= 0 && fallback > nativeEnd);
-  assert.match(allText(h.requests[1]!), /plan one/);
-  const recovered = allText(h.requests[2]!);
-  assert.match(recovered, /plan one.*plan two/s);
-  assert.equal((recovered.match(/The preceding provider response was interrupted/g) ?? []).length, 1);
+  assert.doesNotMatch(allText(h.requests[1]!), /plan one/);
+  assert.doesNotMatch(allText(h.requests[2]!), /plan one|plan two|The preceding provider response was interrupted/);
+  assert.equal(h.checkpoints().length, 0);
   assert.equal(h.events.filter((event) => event.type === "agent_settled").length, 1);
   assert.deepEqual(h.errors, []);
 });
@@ -108,10 +108,7 @@ test("persistent terminated errors exhaust the stream budget without rewriting f
   assert.equal(h.faux.state.callCount, 4);
   assert.equal(h.continuations().length, 1);
   assert.equal(h.events.filter((event) => event.type === "auto_retry_start").length, 2);
-  const final = h.session.messages.findLast((message) => message.role === "assistant");
-  assert.ok(final?.role === "assistant");
-  assert.equal(final.stopReason, "error");
-  assert.equal(final.errorMessage, "terminated");
+  assert.equal(h.session.messages.some((message) => message.role === "assistant" && message.stopReason === "error"), false);
   assert.equal(h.manager.getBranch().filter((entry) => entry.type === "message" &&
     entry.message.role === "assistant" && entry.message.stopReason === "error" &&
     entry.message.errorMessage === "terminated").length, 4);
@@ -162,8 +159,9 @@ test("queued steering input after terminated needs no extension fallback", async
   assert.equal(h.requests.length, 2);
   assert.equal(h.faux.state.callCount, 2);
   assert.equal(h.continuations().length, 0);
+  assert.equal(h.checkpoints().length, 0);
   assert.match(allText(h.requests[1]!), /New user instruction/);
-  assert.match(allText(h.requests[1]!), /partial plan/);
+  assert.doesNotMatch(allText(h.requests[1]!), /partial plan/);
   assert.equal(h.events.at(-1)?.type, "agent_settled");
   assert.deepEqual(h.errors, []);
 });

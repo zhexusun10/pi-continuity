@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Type, fauxAssistantMessage, fauxThinking, fauxToolCall } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxThinking, fauxToolCall } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { CHECKPOINT_TYPE, CONTINUATION_TYPE } from "../lib/continuity.ts";
 import { allText, createHarness } from "./harness.ts";
 
 const length = (text = "x".repeat(64)) => fauxAssistantMessage(text, { stopReason: "length" });
@@ -46,8 +48,8 @@ for (const [name, content] of [
     assert.equal(h.events.at(-1)?.type, "agent_settled");
     assert.doesNotMatch(allText(h.requests[1]!), /Your response hit an output limit/);
     assert.doesNotMatch(JSON.stringify(h.requests[1]), /INCOMPLETE_SIGNATURE/);
-    if (name === "thinking-only") assert.match(allText(h.requests[1]!), /work out the next step/);
-    if (name === "mixed") assert.match(allText(h.requests[1]!), /partial thought.*partial answer/s);
+    assert.doesNotMatch(allText(h.requests[1]!), /work out the next step|partial thought|partial answer/);
+    assert.equal(h.checkpoints().length, 0);
     assert.equal(h.session.messages.at(-1)?.role, "assistant");
     assert.deepEqual(h.errors, []);
     const original = h.manager.getBranch().find((entry) => entry.type === "message" && entry.message.role === "assistant" && entry.message.stopReason === "length");
@@ -68,11 +70,11 @@ test("length-truncated tools are never executed; a complete re-issued tool execu
   await h.session.prompt("Finish the task");
   assert.equal(executed, 1);
   assert.equal(h.requests.length, 3);
-  assert.match(allText(h.requests[1]!), /NOT executed/);
-  assert.match(allText(h.requests[1]!), /write plan/);
+  assert.doesNotMatch(allText(h.requests[1]!), /write plan|NOT executed/);
   assert.doesNotMatch(JSON.stringify(h.requests[1]), /UNSAFE_ARGUMENT/);
   assert.equal(h.requests[1]!.some((message) => message.role === "toolResult"), false);
   assert.equal(h.continuations().length, 1);
+  assert.equal(h.checkpoints().length, 0);
   assert.deepEqual(h.errors, []);
 });
 
@@ -119,14 +121,14 @@ test("tool-tail can be disabled for tools that intentionally terminate the run",
   assert.equal(h.continuations().length, 0);
 });
 
-test("native retry gets the readable partial checkpoint without an extra fallback", async (t) => {
+test("native retry receives no injected partial checkpoint", async (t) => {
   const h = await createHarness({ nativeRetries: 1 });
   t.after(h.cleanup);
   h.setResponses([broken("network connection lost", "preserve this plan"), fauxAssistantMessage("done")]);
   await h.session.prompt("Finish the task");
   assert.equal(h.requests.length, 2);
-  assert.match(allText(h.requests[1]!), /preserve this plan/);
-  assert.equal(h.checkpoints().length, 1);
+  assert.doesNotMatch(allText(h.requests[1]!), /preserve this plan/);
+  assert.equal(h.checkpoints().length, 0);
   assert.equal(h.continuations().length, 0);
   assert.ok(h.events.some((event) => event.type === "auto_retry_start"));
   assert.equal(h.events.filter((event) => event.type === "agent_settled").length, 1);
@@ -153,11 +155,9 @@ test("extra stream recovery follows exhausted native retries, never races them",
   await h.session.prompt("Finish the task");
   assert.equal(h.requests.length, 3);
   assert.equal(h.continuations().length, 1);
-  assert.equal(h.checkpoints().length, 3);
+  assert.equal(h.checkpoints().length, 0);
   const recoveredContext = allText(h.requests[2]!);
-  assert.match(recoveredContext, /plan one.*plan two/s);
-  assert.doesNotMatch(recoveredContext, /The provider stream failed/);
-  assert.equal((recoveredContext.match(/The preceding provider response was interrupted/g) ?? []).length, 1);
+  assert.doesNotMatch(recoveredContext, /plan one|plan two|The preceding provider response was interrupted/);
   assert.equal(h.events.filter((event) => event.type === "agent_settled").length, 1);
   assert.deepEqual(h.errors, []);
 });
@@ -185,7 +185,8 @@ test("error-reported truncation also resumes without executing its partial tool"
   assert.equal(h.requests.length, 2);
   assert.equal(executed, 0);
   assert.equal(h.continuations().length, 1);
-  assert.match(allText(h.requests[1]!), /unfinished plan/);
+  assert.equal(h.checkpoints().length, 0);
+  assert.doesNotMatch(allText(h.requests[1]!), /unfinished plan/);
 });
 
 test("empty successful responses get bounded recovery", async (t) => {
@@ -245,48 +246,47 @@ test("truncation budget spans retries and resets for the next actual user reques
   assert.equal(h.continuations().length, 3);
 });
 
-test("repeated truncation merges bounded progress into one active continuation", async (t) => {
+test("repeated truncation continues without injecting partial context", async (t) => {
   const h = await createHarness({ flags: { "continuity-max-resumes": "3" } });
   t.after(h.cleanup);
   h.setResponses([length("FIRST_PARTIAL"), length("SECOND_PARTIAL"), fauxAssistantMessage("done")]);
   await h.session.prompt("Finish the task");
   assert.equal(h.requests.length, 3);
   const latest = allText(h.requests[2]!);
-  assert.match(latest, /FIRST_PARTIAL/);
-  assert.match(latest, /SECOND_PARTIAL/);
+  assert.doesNotMatch(latest, /FIRST_PARTIAL|SECOND_PARTIAL/);
   assert.equal((latest.match(/^Continue\./gm) ?? []).length, 0);
-});
-
-test("a checkpoint character cap bounds merged stream context", async (t) => {
-  const h = await createHarness({
-    nativeRetries: 1,
-    flags: { "continuity-checkpoint-max-chars": "120" },
-  });
-  t.after(h.cleanup);
-  h.setResponses([
-    broken("fetch failed", "FIRST_" + "a".repeat(160)),
-    broken("fetch failed", "SECOND_" + "b".repeat(160)),
-    fauxAssistantMessage("done"),
-  ]);
-  await h.session.prompt("Finish the task");
-  const latest = allText(h.requests[2]!);
-  assert.match(latest, /older partial context omitted/);
-  assert.equal((latest.match(/The preceding provider response was interrupted/g) ?? []).length, 1);
+  assert.equal(h.checkpoints().length, 0);
 });
 
 test("stale recovery artifacts are filtered before a new user request", async (t) => {
-  const h = await createHarness({ flags: { "continuity-stream-retries": "1" } });
+  const h = await createHarness();
   t.after(h.cleanup);
-  h.setResponses([
-    broken("fetch failed", "OLD_PARTIAL"),
-    broken("fetch failed", "OLD_PARTIAL_2"),
-  ]);
+  h.setResponses([fauxAssistantMessage("first task done")]);
   await h.session.prompt("First task");
+  h.manager.appendCustomMessageEntry(CHECKPOINT_TYPE, "OLD_PARTIAL", false, {
+    requestId: 0, sourceEntryId: "legacy", partial: "OLD_PARTIAL",
+  });
   h.setResponses([fauxAssistantMessage("new task done")]);
   await h.session.prompt("Second task");
-  assert.doesNotMatch(allText(h.requests[2]!), /OLD_PARTIAL/);
-  assert.match(allText(h.requests[2]!), /Second task/);
+  assert.doesNotMatch(allText(h.requests[1]!), /OLD_PARTIAL/);
+  assert.match(allText(h.requests[1]!), /Second task/);
 });
+
+const legacyFlagCases: Record<string, string | boolean>[] = [{}, { continuity: "false" }];
+for (const flags of legacyFlagCases) {
+  test(`legacy recovery artifacts are never injected: ${JSON.stringify(flags)}`, async (t) => {
+    const h = await createHarness({ flags });
+    t.after(h.cleanup);
+    h.manager.appendCustomMessageEntry(CHECKPOINT_TYPE, "LEGACY_SECRET", false, {
+      requestId: 0, sourceEntryId: "legacy", partial: "LEGACY_SECRET",
+    });
+    h.manager.appendCustomMessageEntry(CONTINUATION_TYPE, "LEGACY_CONTINUATION", false, { requestId: 0 });
+    h.setResponses([fauxAssistantMessage("done")]);
+    await h.session.prompt("Task");
+    assert.doesNotMatch(allText(h.requests[0]!), /LEGACY_SECRET|LEGACY_CONTINUATION/);
+    assert.equal(h.manager.getBranch().filter((entry) => entry.type === "custom_message").length, 2);
+  });
+}
 test("stream budget is not reset by each native agent_start", async (t) => {
   const h = await createHarness({ nativeRetries: 1, flags: { "continuity-stream-retries": "1" } });
   t.after(h.cleanup);
@@ -325,7 +325,7 @@ test("boundary entries from earlier extensions are preserved", async (t) => {
   assert.equal(h.continuations().length, 1);
 });
 
-test("earlier boundary redaction is not undone by partial recovery", async (t) => {
+test("earlier boundary redaction content is never re-injected", async (t) => {
   const h = await createHarness({ before: (pi) => {
     pi.on("turn_end", (event) => {
       if (event.message.role !== "assistant" || event.message.stopReason !== "length") return;
@@ -336,8 +336,11 @@ test("earlier boundary redaction is not undone by partial recovery", async (t) =
   h.setResponses([length("PRIVATE_SECRET"), fauxAssistantMessage("done")]);
   await h.session.prompt("Finish the task");
   assert.equal(h.requests.length, 2);
-  assert.doesNotMatch(allText(h.requests[1]!), /PRIVATE_SECRET/);
-  assert.match(allText(h.requests[1]!), /\[redacted\]/);
+  assert.doesNotMatch(allText(h.requests[1]!), /PRIVATE_SECRET|\[redacted\]/);
+  assert.equal(h.checkpoints().length, 0);
+  const raw = h.manager.getBranch().find((entry) => entry.type === "message" &&
+    entry.message.role === "assistant" && entry.message.stopReason === "length");
+  assert.ok(raw?.type === "message" && JSON.stringify(raw.message).includes("PRIVATE_SECRET"));
 });
 
 test("earlier continuation decision is not doubled", async (t) => {
@@ -365,8 +368,9 @@ test("queued user input replaces the need for an injected Continue", async (t) =
   await h.session.prompt("Original instruction");
   assert.equal(h.requests.length, 2);
   assert.equal(h.continuations().length, 0);
+  assert.equal(h.checkpoints().length, 0);
   assert.match(allText(h.requests[1]!), /New user instruction/);
-  assert.match(allText(h.requests[1]!), /salvage this thought/);
+  assert.doesNotMatch(allText(h.requests[1]!), /salvage this thought/);
   assert.doesNotMatch(JSON.stringify(h.requests[1]), /BROKEN_SIGNATURE/);
 });
 

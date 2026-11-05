@@ -88,7 +88,7 @@ def hero():
     node(draw, 82, 375, 2, "No natural next request", "No queued input or continuation")
     connector(draw, 94, 434, 463)
     node(draw, 82, 469, 3, "The task may settle early", "Final stop reason stays length", WARN)
-    node(draw, 658, 281, 1, "Keep readable progress", "Omit broken protocol replay")
+    node(draw, 658, 281, 1, "Omit incomplete assistant", "No checkpoint injection")
     connector(draw, 670, 340, 369, ACCENT)
     node(draw, 658, 375, 2, "Resume within policy", "Continue + runnable context", ACCENT)
     connector(draw, 670, 434, 463, ACCENT)
@@ -96,7 +96,7 @@ def hero():
     text(draw, (82, 550), "INTERRUPTED TURN != FINISHED TASK", 16, WARN, "mono")
     text(draw, (658, 550), "CANCELLATION + APPROVALS + BUDGETS", 16, ACCENT, "mono")
     cards = [
-        (56, 432, "Output truncation", "Keep readable partial context", "Never run partial tool arguments"),
+        (56, 432, "Output truncation", "Omit incomplete assistant", "Never run partial tool arguments"),
         (456, 828, "Broken stream", "Native recovery gets first refusal", "Bounded fallback with backoff"),
         (852, 1224, "Tool-call ending", "Results come before Continue", "Do not rerun completed tools"),
     ]
@@ -114,14 +114,14 @@ SCENARIOS = [
         "title": "1 / 3  Output truncation",
         "setup": "At the desired output cap, with no pending user input.",
         "baseline": [
-            "Model emits partial reasoning",
+            "Model emits incomplete reasoning",
             "stopReason = length",
             "No tool call or queued input",
             "The task can end here",
         ],
         "recovery": [
             "Detect the interrupted turn",
-            "Keep readable partial context",
+            "Omit incomplete assistant",
             "Omit broken replay metadata",
             "Append Continue within budget",
             "Make the next provider request",
@@ -139,7 +139,7 @@ SCENARIOS = [
             "The task can end on the error",
         ],
         "recovery": [
-            "Save a readable checkpoint",
+            "Omit failed assistant",
             "Let native recovery run first",
             "If still failing at settlement:",
             "Bounded backoff + Continue",

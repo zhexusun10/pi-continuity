@@ -8,18 +8,18 @@ Here, **loop engineering** means controlling the transition from a completed res
 
 ## Problem → trace → solution
 
-A reasoning-only response reaches its output cap. There are no parsed tool calls and no queued user message. Pi's low-level loop finishes; conditional post-run compaction does not recover an at-cap output. The extension removes the interrupted assistant from the next model projection, keeps a bounded quoted partial when useful, and requests one next model turn through the session boundary.
+A reasoning-only response reaches its output cap. There are no parsed tool calls and no queued user message. Pi's low-level loop finishes; conditional post-run compaction does not recover an at-cap output. The extension removes the interrupted assistant from the next model projection and requests one next model turn through the session boundary. It injects no partial text, reasoning, checkpoint, or hidden prompt.
 
 ```text
 user task
   → assistant(length, thinking fragment, no tool call)
   → turn_end
   → [without extension] agent_end → settlement
-  → [with extension] context omission + optional quoted partial checkpoint
+  → [with extension] context omission
   → public boundary `continue: true` → next provider request
 ```
 
-A boundary continuation requires runnable projected context. The extension removes the interrupted assistant and any synthetic results that belong to it; a preceding user message or completed tool result then makes the context runnable. A custom checkpoint is added only when readable partial progress or an interrupted-tool note is useful. Returning boundary drafts and a continuation decision makes the change synchronous and persistent; it avoids fire-and-forget `sendUserMessage()` races at `agent_end` and works in TUI, RPC, JSON, and print modes.
+A boundary continuation requires runnable projected context. The extension removes the interrupted assistant and any synthetic results that belong to it; a preceding user message or completed tool result then makes the context runnable. It adds no model-visible checkpoint or instruction. Returning boundary drafts and a continuation decision makes the change synchronous and persistent; it avoids fire-and-forget `sendUserMessage()` races at `agent_end` and works in TUI, RPC, JSON, and print modes.
 
 ## Integration layers
 
@@ -47,41 +47,39 @@ See the version-pinned [core hooks](https://github.com/earendil-works/pi/blob/76
 | --- | --- |
 | `session_start` | Read and validate flags; clear state. Invalid spending limits disable recovery and surface an extension error. |
 | `before_agent_start`, actual user `message_start` | Reset the request budget and captured last turn. Our hidden custom messages do not reset it. |
-| `turn_end` / `length` | Preserve earlier boundary drafts; omit interrupted assistant/synthetic results, append an optional bounded checkpoint, and return `continue: true`. If other work already ensures a next request, append only the safe checkpoint. |
-| `turn_end` / recoverable `error` | Capture readable partial content as a hidden checkpoint, **without** requesting fallback. Pi's native retry policy gets first refusal. |
+| `turn_end` / `length` | Preserve earlier boundary drafts; omit interrupted assistant/synthetic results and return `continue: true`. If other work already ensures a next request, only sanitize the projection. |
+| `turn_end` / recoverable `error` | Omit the failed assistant from the projection, **without** requesting fallback and without a checkpoint. Pi's native retry policy gets first refusal. |
 | `turn_end` / usage limit | With provider-independent minute guidance, wait the advertised time; without guidance, poll at a fixed 10-minute interval. Both wait with the live public abort signal before any native 429 retry. Interrupt on abort/off/new input; poll directly queued input once per second. |
 | `agent_before_settle` | After native retries/compaction/queues, inspect the last finalized turn. Recover a transient error, completed usage-limit wait or poll, empty successful response, explicit error-reported output cap, or final tool tail by repairing the projected context and returning `continue: true` when no other continuation/input is pending. |
-| `context` | Before each provider request, omit stale recovery artifacts and incomplete failed assistant protocol messages from the request-time projection; the raw append-only session remains unchanged. |
+| `context` | Before each provider request, omit all recovery artifacts and incomplete failed assistant protocol messages from the request-time projection; the raw append-only session remains unchanged. |
 | `agent_settled` | Drop the captured last turn and timer; retain counts for status. |
 | `session_tree`, `session_shutdown` | Clear branch-sensitive state and cancel any extension-owned wait. |
 
 Do not reset on `agent_start`: native retry can emit it several times inside one user request. Otherwise a retry limit becomes an unlimited loop.
 
-## Protocol-safe partial context
+## No injected model context
 
-We intentionally do not replay the original incomplete assistant as if it completed successfully. We also do not change `stopReason` to hide failure from a harness.
+The extension deliberately refuses to inject any prompt, checkpoint, quoted partial, reasoning fragment, or hidden instruction into model context. Recovery is limited to:
 
-1. Read the boundary's **projected** content so earlier boundary redactions/omissions are respected.
-2. Extract readable text and non-redacted reasoning. Exclude tool arguments and all opaque signatures/response IDs.
-3. JSON-quote the unfinished fragments and label them as context, not verified results or new user instructions. Quotation is a boundary marker, not a complete defense against model prompt injection.
-4. Append `context_edit` omissions and an optional hidden `custom_message` checkpoint. Repeated checkpoints from the same request are merged into one bounded active checkpoint; older recovery messages and markers are removed from the next request. Raw history and usage remain unchanged; prior completed actions are not omitted.
-5. Explain that interrupted tool calls were not executed in the optional checkpoint. Tool-tail recovery is different: completed tool results remain in place and the boundary requests the next model turn after them.
+1. Append-only `context_edit` entries that omit an interrupted assistant and synthetic results that cannot be replayed safely.
+2. A `continue: true` boundary decision that asks Pi to start the next model turn.
+3. A plain `custom` session entry that records the recovery attempt; this entry does not participate in model context.
 
-For native stream retries, the checkpoint is committed at `turn_end` before Pi omits the errored assistant. The fallback does not duplicate that partial content. Only finalized content exposed by the provider is saved; deltas discarded by a provider before finalization are not reconstructed.
+The next request therefore sees the original task and any completed tool results, without partial output from the interrupted response. This trades away partial-progress reuse for a strict no-prompt-injection policy.
 
-Pi persists these hidden messages. They are model context, not telemetry, but can include sensitive reasoning. A later redaction extension must handle both the original message and the copied custom checkpoint. Removing the extension does not remove prior entries. At a new user-request boundary, stale pi-continuity recovery artifacts are omitted from the active model projection (except the first resumed request after a session reload); this does not erase their raw entries. Another extension can replace the returned drafts or override continuation later; extension load order is an explicit composition boundary.
+Raw history and usage remain unchanged. Prior completed actions are not omitted. Another extension can replace the returned drafts or override continuation later; extension load order is an explicit composition boundary.
 
 ## Retry and cost limits
 
-The total cap defaults to 8 extension-scheduled continuations per actual user request. The stream/empty-response sub-cap defaults to 6, with three 5-second waits followed by three 10-second waits. Readable partial checkpoints are merged and capped at 12,000 characters by default (configurable up to 64,000); `--continuity-checkpoint-max-chars=0` disables copied partial context. All limits are checked before scheduling; only successful scheduling consumes the extension budget. `unlimited` explicitly removes the total cap, but not the stream sub-cap or checkpoint character cap.
+The total cap defaults to 16 extension-scheduled continuations per actual user request. The stream/empty-response sub-cap defaults to 12, with three 5-second waits followed by nine 10-second waits. All limits are checked before scheduling; only successful scheduling consumes the extension budget. `unlimited` explicitly removes the total cap, but not the stream sub-cap.
 
 Timed limits are recognized only in finalized error messages with `Try again in [~]N min/mins/minute(s)` or `Retry in ...`; provider IDs and login methods are irrelevant. A `~` value gets 30 seconds of margin because Pi rounds Codex reset minutes. Exact values wait N minutes; approximate zero waits 30 seconds. Timed continuations consume the total cap, not the stream sub-cap, and are never reduced to the 10-second stream delay. Long timers are segmented to avoid Node's 2,147,483,647 ms timer overflow.
 
 Usage limits without valid reset guidance (for example a Codex mid-stream `Codex error: The usage limit has been reached`) are polled instead: wait 10 minutes, continue the task, and repeat until the provider answers or the 5-hour window closes (at most 30 attempts). Because a provider's usage window is commonly 5 h, the first window matches it exactly; once a window has been given up, later windows add a 20-minute buffer and use 5 h 20 min (at most 32 attempts), so the poll does not stop at the same instant the provider resets. Missing, negative, non-finite, or unsafe minute counts take this path. The poll has its own bound and does not consume the total resume cap, but `--continuity-max-resumes=0` and `--continuity=false` disable it. `insufficient_quota`, `quota exceeded`, `out of budget`, `billing`, and `available balance` remain terminal.
 
-Unlike short stream fallback, the limit wait belongs to `turn_end`: Pi 1.0.x–1.4.0 exposes an active cancellation signal there but not in post-run settlement. Waiting for hours at `agent_before_settle` would leave SDK abort/Escape blocked until the timer expires. Waiting earlier also prevents native 429 retry from running before the advertised reset. The extension does not request an error-turn continuation at `turn_end`; after waiting it leaves native recovery in charge and falls back at settlement if needed. A cancelled wait never schedules timed continuation. State/timers are in memory and are not restored on reload or process restart.
+Unlike short stream fallback, the limit wait belongs to `turn_end`: Pi 1.0.x–1.5.0 exposes an active cancellation signal there but not in post-run settlement. Waiting for hours at `agent_before_settle` would leave SDK abort/Escape blocked until the timer expires. Waiting earlier also prevents native 429 retry from running before the advertised reset. The extension does not request an error-turn continuation at `turn_end`; after waiting it leaves native recovery in charge and falls back at settlement if needed. A cancelled wait never schedules timed continuation. State/timers are in memory and are not restored on reload or process restart.
 
-Stream recovery adds at most 6 extension fallbacks by default, after native recovery has finished: attempts 1–3 wait 5 seconds and attempts 4–6 wait 10 seconds. The base is configurable with `--continuity-stream-delay-ms`; later attempts use 2x the base and are capped at 10000 ms. Length and tool-tail continuations are immediate. A local AbortController cancels waits on off/reset/shutdown; a live `ctx.signal` is combined when available. The boundary also rechecks queued messages and the current extension state after waiting. Pi itself rejects another boundary request if the user aborts during settlement. When no active signal exists in the post-run boundary, the finite wait may finish before cancellation settles; drafts/counts can represent a scheduled continuation that Pi did not ultimately execute.
+Stream recovery adds at most 12 extension fallbacks by default, after native recovery has finished: attempts 1–3 wait 5 seconds and attempts 4–12 wait 10 seconds. The base is configurable with `--continuity-stream-delay-ms`; later attempts use 2x the base and are capped at 10000 ms. Length and tool-tail continuations are immediate. A local AbortController cancels waits on off/reset/shutdown; a live `ctx.signal` is combined when available. The boundary also rechecks queued messages and the current extension state after waiting. Pi itself rejects another boundary request if the user aborts during settlement. When no active signal exists in the post-run boundary, the finite wait may finish before cancellation settles; drafts/counts can represent a scheduled continuation that Pi did not ultimately execute.
 
 These limits are **not** global provider-call budgets. Pi's native retries may start a fresh batch after each fallback. For a persistent transient error with `N` native retries and `S` fallbacks, up to `(N + 1) × (S + 1)` outer calls may occur, before considering provider-internal retries. Normal tool loops and native truncated-tool continuation are not bounded by this extension. Reload/restart resets in-memory state. Set a harness deadline and provider/tool timeouts separately.
 

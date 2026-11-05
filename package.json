@@ -1,6 +1,6 @@
 {
   "name": "pi-continuity",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Pi coding-agent extension that recovers truncated turns, failed streams, empty responses, and terminal tool-call tails through public session boundaries.",
   "type": "module",
   "license": "MIT",
@@ -23,7 +23,7 @@
   ],
   "pi": {
     "extensions": ["./extensions/index.ts"],
-    "image": "https://raw.githubusercontent.com/zhexusun10/pi-continuity/main/assets/loop-engineering.png?v=2",
+    "image": "https://raw.githubusercontent.com/zhexusun10/pi-continuity/main/assets/loop-engineering.png?v=3",
     "video": "https://raw.githubusercontent.com/zhexusun10/pi-continuity/main/assets/demo.mp4"
   },
   "engines": { "node": ">=22.19.0" },
@@ -32,11 +32,12 @@
     "@earendil-works/pi-ai": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "1.4.0",
-    "@earendil-works/pi-ai": "1.4.0",
-    "@earendil-works/pi-agent-core": "1.4.0",
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@earendil-works/pi-ai": "1.5.0",
+    "@earendil-works/pi-agent-core": "1.5.0",
     "@types/node": "22.19.19",
     "tsx": "4.23.15",
+    "typebox": "1.3.27",
     "typescript": "5.9.3"
   },
   "scripts": {

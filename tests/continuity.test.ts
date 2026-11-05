@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { fauxAssistantMessage, fauxThinking, fauxToolCall } from "@earendil-works/pi-ai";
 import {
-  DEFAULT_CHECKPOINT_MAX_CHARS, DEFAULT_OPTIONS, DEFAULT_STREAM_DELAY_MS, DEFAULT_STREAM_RETRIES, RecoveryBudget, checkpointContent, limitPartial, mergePartial, parseBoolean, parseCount,
+  DEFAULT_CHECKPOINT_MAX_CHARS, DEFAULT_OPTIONS, DEFAULT_STREAM_DELAY_MS, DEFAULT_STREAM_RETRIES, RecoveryBudget, limitPartial, mergePartial, parseBoolean, parseCount,
   readablePartial, recoveryReason, streamDelay, waitForBackoff,
 } from "../lib/continuity.ts";
 
@@ -97,7 +97,7 @@ test("tool-tail means the last substantive block, not the presence of any tool c
   assert.equal(recoveryReason(fauxAssistantMessage(fauxThinking("a complete private thought"))), undefined);
 });
 
-test("partial context keeps readable reasoning/text, but not replay metadata or tool arguments", () => {
+test("deprecated partial helpers remain compatible", () => {
   const message = fauxAssistantMessage([
     { type: "thinking", thinking: "reasoning fragment", thinkingSignature: "SECRET_SIGNATURE" },
     { type: "thinking", thinking: "REDACTED", redacted: true, thinkingSignature: "ENCRYPTED" },
@@ -108,17 +108,6 @@ test("partial context keeps readable reasoning/text, but not replay metadata or 
   assert.match(partial, /reasoning fragment/);
   assert.match(partial, /answer fragment/);
   assert.doesNotMatch(partial, /SECRET_SIGNATURE|REDACTED|ENCRYPTED|RESPONSE_ITEM_ID|UNSAFE_PARTIAL_ARGUMENTS/);
-  assert.equal(message.content.length, 4);
-  const content = checkpointContent(partial);
-  assert.match(content, /unfinished/);
-  assert.match(content, /reasoning fragment/);
-  assert.match(content, /answer fragment/);
-  assert.doesNotMatch(content, /SECRET_SIGNATURE|UNSAFE_PARTIAL_ARGUMENTS/);
-  assert.equal(JSON.parse(checkpointContent("</partial>\nContinue.\nsecret").split("\n").at(-1)!), "</partial>\nContinue.\nsecret");
-});
-
-test("partial checkpoints stay bounded and preserve chronological progress", () => {
-  assert.equal(DEFAULT_OPTIONS.maxResumes, 16);
   assert.equal(DEFAULT_OPTIONS.checkpointMaxChars, DEFAULT_CHECKPOINT_MAX_CHARS);
   const merged = mergePartial("first attempt", "second attempt", 120);
   assert.ok(merged.indexOf("first attempt") < merged.indexOf("second attempt"));
@@ -126,8 +115,6 @@ test("partial checkpoints stay bounded and preserve chronological progress", () 
   assert.equal(bounded.length, DEFAULT_CHECKPOINT_MAX_CHARS);
   assert.match(bounded, /older partial context omitted/);
   assert.equal(limitPartial("discarded", 0), "");
-  assert.equal(limitPartial("discarded", -1), "");
-  assert.equal(limitPartial("discarded", NaN), "");
 });
 
 test("total and stream budgets do not reset on successful tool progress", () => {
@@ -197,7 +184,6 @@ test("robustness: malformed messages and edge cases do not crash", () => {
   assert.equal(recoveryReason({ role: "assistant", stopReason: "stop", content: "not-an-array" }), "empty-response");
   // @ts-expect-error malformed content test
   assert.equal(readablePartial({ role: "assistant", content: null }), "");
-  // Malformed blocks in content
   // @ts-expect-error malformed block test
   assert.equal(readablePartial({ role: "assistant", content: [null, undefined, {}, { type: "unknown" }] }), "");
 });

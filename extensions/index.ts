@@ -5,7 +5,7 @@ import type {
 import {
   CHECKPOINT_TYPE, CONTINUATION_TYPE, DEFAULT_CHECKPOINT_MAX_CHARS, DEFAULT_OPTIONS, DEFAULT_STREAM_DELAY_MS, DEFAULT_STREAM_RETRIES,
   EXTENDED_USAGE_POLL_WINDOW_MS, MAX_CHECKPOINT_CHARS, RecoveryBudget, USAGE_POLL_DELAY_MS, USAGE_POLL_WINDOW_MS,
-  checkpointContent, limitPartial, mergePartial, parseBoolean, parseCount, readablePartial, recoveryReason, streamDelay, usageLimitDelayMs, waitForBackoff,
+  parseBoolean, parseCount, recoveryReason, streamDelay, usageLimitDelayMs, waitForBackoff,
   type ContinuityOptions, type RecoveryReason,
 } from "../lib/continuity.ts";
 
@@ -14,7 +14,6 @@ interface LastTurn {
   message: AssistantMessage;
   entryId: string;
   toolResultIds: string[];
-  partial: string;
   resumed: boolean;
   usageWaitCompleted?: boolean;
   usagePoll?: boolean;
@@ -35,15 +34,6 @@ interface UsagePoll {
 
 interface RecoveryArtifact {
   id: string;
-  kind: "checkpoint" | "continuation";
-  partial: string;
-  requestId?: number;
-}
-
-interface CheckpointDetails {
-  requestId: number;
-  sourceEntryId: string;
-  partial: string;
 }
 
 /** Public boundary hooks only. No direct provider calls, file I/O, or core patches. */
@@ -51,7 +41,6 @@ export default function piContinuity(pi: ExtensionAPI): void {
   let options: ContinuityOptions = { ...DEFAULT_OPTIONS };
   let budget = new RecoveryBudget();
   let requestId = 0;
-  let firstRequestAfterSession = false;
   let last: LastTurn | undefined;
   let waiting: PendingWait | undefined;
   let usagePoll: UsagePoll | undefined;
@@ -71,7 +60,7 @@ export default function piContinuity(pi: ExtensionAPI): void {
   });
   pi.registerFlag("continuity-checkpoint-max-chars", {
     type: "string", default: String(DEFAULT_CHECKPOINT_MAX_CHARS),
-    description: "Maximum merged partial context characters (0 disables partial context)",
+    description: "Deprecated no-op; checkpoint text is never injected",
   });
   pi.registerFlag("continuity-tool-tail", {
     type: "string", default: "true", description: "Continue a settled tool-call ending (true|false)",
@@ -93,6 +82,7 @@ export default function piContinuity(pi: ExtensionAPI): void {
       ((reason !== "stream-error" && reason !== "empty-response") || options.streamRetries > 0);
   }
 
+  /** Validate the deprecated flag so old scripts keep the same fail-closed behavior. */
   function parseCheckpointMaxChars(): number {
     const value = parseCount(
       pi.getFlag("continuity-checkpoint-max-chars"), "continuity-checkpoint-max-chars", DEFAULT_CHECKPOINT_MAX_CHARS,
@@ -107,27 +97,13 @@ export default function piContinuity(pi: ExtensionAPI): void {
     return event.continue || event.context.pendingMessages.length > 0 || ctx.hasPendingMessages();
   }
 
-  function detailsFromUnknown(details: unknown): { requestId?: number; partial: string } {
-    if (typeof details !== "object" || details === null) return { partial: "" };
-    const record = details as Record<string, unknown>;
-    return {
-      requestId: typeof record.requestId === "number" ? record.requestId : undefined,
-      partial: typeof record.partial === "string" ? record.partial : "",
-    };
-  }
-
   function recoveryArtifacts(event: TurnEndEvent | AgentBeforeSettleEvent): RecoveryArtifact[] {
     return event.context.contextEntries.flatMap((entry): RecoveryArtifact[] => {
       if (entry.messages.length === 0) return [];
       const source = entry.sourceEntry;
       if (source.type !== "custom_message") return [];
-      if (source.customType === CHECKPOINT_TYPE) {
-        const details = detailsFromUnknown(source.details);
-        return [{ id: source.id, kind: "checkpoint" as const, ...details }];
-      }
-      if (source.customType === CONTINUATION_TYPE) {
-        const details = detailsFromUnknown(source.details);
-        return [{ id: source.id, kind: "continuation" as const, ...details }];
+      if (source.customType === CHECKPOINT_TYPE || source.customType === CONTINUATION_TYPE) {
+        return [{ id: source.id }];
       }
       return [];
     });
@@ -148,32 +124,11 @@ export default function piContinuity(pi: ExtensionAPI): void {
     return [...entries, ...edits];
   }
 
-  function checkpointDraft(
-    event: TurnEndEvent | AgentBeforeSettleEvent,
-    turn: LastTurn,
-    suffix = "",
-    baseEntries = event.entries,
-  ): SessionBoundaryDraft[] {
-    const priorPartial = recoveryArtifacts(event)
-      .filter((artifact) => artifact.requestId === requestId && artifact.partial)
-      .reduce((merged, artifact) => mergePartial(merged, artifact.partial, options.checkpointMaxChars), "");
-    const partial = mergePartial(priorPartial, turn.partial, options.checkpointMaxChars);
-    const entries = omitRecoveryArtifacts(baseEntries, event);
-    if (!partial && !suffix) return entries;
-    const content = partial
-      ? checkpointContent(partial, options.checkpointMaxChars) + suffix
-      : "The preceding provider response was interrupted. No readable partial assistant context was available." + suffix;
-    const details: CheckpointDetails = { requestId, sourceEntryId: turn.entryId, partial };
-    return [...entries, {
-      type: "custom_message", customType: CHECKPOINT_TYPE, display: false, content, details,
-    }];
-  }
-
   function reserve(reason: RecoveryReason, ctx: ExtensionContext): boolean {
     if (budget.canResume(reason, options)) return true;
     if (!warned) {
       warned = true;
-      if (ctx.hasUI) ctx.ui.notify("pi-continuity: recovery budget exhausted. Inspect the task before continuing manually.", "warning");
+      if (ctx.hasUI) ctx.ui.notify("pi-continuity: recovery budget exhausted. Inspect the task before sending another request.", "warning");
       if (ctx.mode === "tui") ctx.ui.setStatus("pi-continuity", "continuity: budget exhausted");
     }
     return false;
@@ -236,32 +191,30 @@ export default function piContinuity(pi: ExtensionAPI): void {
     }
   }
 
-  function omitInterrupted(entries: SessionBoundaryDraft[], turn: LastTurn): SessionBoundaryDraft[] {
+  function omitInterrupted(
+    entries: SessionBoundaryDraft[], event: TurnEndEvent | AgentBeforeSettleEvent, turn: LastTurn,
+  ): SessionBoundaryDraft[] {
     // Keep raw history/usage intact, but don't replay broken signed reasoning or orphan tool calls.
-    return [...entries, ...[turn.entryId, ...turn.toolResultIds].map((targetId): SessionBoundaryDraft => ({
-      type: "context_edit", targetId, replacement: null,
-    }))];
-  }
-
-  function unexecutedToolsSuffix(toolNames: string[]): string {
-    const unique = Array.from(new Set(toolNames.filter((name) => typeof name === "string" && name.trim())));
-    return unique.length ? "\nCalls in the interrupted response were NOT executed. Re-issue any still needed " +
-      "with complete arguments; do not treat partial calls as results. Tool names: " + JSON.stringify(unique) : "";
+    // Omission must win over a prior replacement so the projected context remains runnable; only
+    // skip targets that are already omitted (avoids duplicate null edits).
+    const alreadyOmitted = new Set([
+      ...entries.flatMap((entry) =>
+        entry.type === "context_edit" && entry.replacement === null ? [entry.targetId] : []),
+      ...event.context.contextEntries.flatMap((entry) =>
+        entry.sourceEntry.type === "context_edit" && entry.sourceEntry.replacement === null
+          ? [entry.sourceEntry.targetId] : []),
+    ]);
+    return [...entries, ...[turn.entryId, ...turn.toolResultIds]
+      .filter((targetId) => !alreadyOmitted.has(targetId))
+      .map((targetId): SessionBoundaryDraft => ({ type: "context_edit", targetId, replacement: null }))];
   }
 
   function resume(
     event: TurnEndEvent | AgentBeforeSettleEvent, turn: LastTurn, reason: RecoveryReason, ctx: ExtensionContext, record = true,
   ): BoundaryResult {
     const interrupted = reason !== "tool-tail";
-    const baseEntries = interrupted ? omitInterrupted(event.entries, turn) : [...event.entries];
-    const unexecutedTools = interrupted
-      ? (Array.isArray(turn.message.content)
-        ? turn.message.content.flatMap((block) => block.type === "toolCall" && typeof block.name === "string" ? [block.name] : [])
-        : [])
-      : [];
-    const entries = interrupted
-      ? checkpointDraft(event, turn, unexecutedToolsSuffix(unexecutedTools), baseEntries)
-      : omitRecoveryArtifacts(baseEntries, event);
+    const baseEntries = interrupted ? omitInterrupted(event.entries, event, turn) : [...event.entries];
+    const entries = omitRecoveryArtifacts(baseEntries, event);
     if (record) budget.record(reason);
     turn.resumed = true;
     const attempt = record ? budget.total : usagePoll?.attempts ?? 0;
@@ -279,7 +232,6 @@ export default function piContinuity(pi: ExtensionAPI): void {
   pi.on("session_start", (_event, ctx) => {
     reset(ctx);
     usagePollExhaustions = 0;
-    firstRequestAfterSession = true;
     try {
       options = {
         enabled: parseBoolean(pi.getFlag("continuity"), "continuity", true),
@@ -303,27 +255,23 @@ export default function piContinuity(pi: ExtensionAPI): void {
     }
   });
   pi.on("context", (event) => {
-    if (!options.enabled) return;
-    // Context edits clean the persisted branch at the next boundary. This hook also prevents
-    // stale artifacts from a previous user request entering the very first prompt of a new one.
-    const lastUserIndex = event.messages.findLastIndex((message) => message.role === "user");
-    return { messages: event.messages.filter((message, index) => {
-      if (message.role === "assistant" &&
-        (message.stopReason === "error" || message.stopReason === "length" || message.stopReason === "aborted")) {
-        // Failed/incomplete assistant protocol blocks are unsafe to replay. Their readable
-        // progress, when eligible, is represented by our bounded checkpoint instead.
+    return { messages: event.messages.filter((message) => {
+      // Legacy recovery artifacts are always omitted, even when recovery is disabled or failed closed.
+      // Otherwise an old session could re-inject checkpoint text on its first request.
+      if (message.role === "custom" &&
+        (message.customType === CHECKPOINT_TYPE || message.customType === CONTINUATION_TYPE)) {
         return false;
       }
-      if (message.role !== "custom" || (message.customType !== CHECKPOINT_TYPE && message.customType !== CONTINUATION_TYPE)) {
-        return true;
+      if (!options.enabled) return true;
+      // Failed/incomplete assistant protocol blocks are unsafe to replay.
+      if (message.role === "assistant" &&
+        (message.stopReason === "error" || message.stopReason === "length" || message.stopReason === "aborted")) {
+        return false;
       }
-      const artifactRequestId = detailsFromUnknown(message.details).requestId;
-      return (last !== undefined && artifactRequestId === last.requestId) ||
-        (firstRequestAfterSession && index > lastUserIndex);
+      return true;
     }) };
   });
   pi.on("session_tree", (_event, ctx) => {
-    firstRequestAfterSession = false;
     reset(ctx);
   });
   pi.on("session_shutdown", (_event, ctx) => reset(ctx));
@@ -331,14 +279,12 @@ export default function piContinuity(pi: ExtensionAPI): void {
 
   pi.on("turn_end", async (event, ctx) => {
     if (event.message.role !== "assistant") return;
-    firstRequestAfterSession = false;
     const projected = event.context.contextEntries.find((entry) => entry.sourceEntry.id === event.messageEntryId)
       ?.messages.find((message): message is AssistantMessage => message.role === "assistant");
     last = {
       requestId,
       message: projected ?? { ...event.message, content: [] }, entryId: event.messageEntryId,
       toolResultIds: event.toolResultEntryIds,
-      partial: projected ? limitPartial(readablePartial(projected), options.checkpointMaxChars) : "",
       resumed: false,
     };
     const reason = recoveryReason(last.message);
@@ -351,13 +297,9 @@ export default function piContinuity(pi: ExtensionAPI): void {
     }
     if (reason === "truncation" && last.message.stopReason === "length") {
       if (hasOtherWork(event, ctx)) {
-        // Existing user input/another continuation already supplies the next request. Still sanitize
-        // the truncated protocol content so reasoning-only fragments cannot poison that request.
-        const unexecuted = Array.isArray(last.message.content)
-          ? last.message.content.flatMap((block) => block.type === "toolCall" && typeof block.name === "string" ? [block.name] : [])
-          : [];
-        const suffix = unexecutedToolsSuffix(unexecuted);
-        const entries = checkpointDraft(event, last, suffix, omitInterrupted(event.entries, last));
+        // Existing user input/another continuation already supplies the next request. Only sanitize
+        // the truncated protocol projection; do not inject any context message.
+        const entries = omitRecoveryArtifacts(omitInterrupted(event.entries, event, last), event);
         return { entries };
       }
       if (reserve(reason, ctx)) return resume(event, last, reason, ctx);
@@ -398,9 +340,9 @@ export default function piContinuity(pi: ExtensionAPI): void {
           }
         }
       }
-      // Native retry runs AFTER agent_end and omits the failed assistant. A safe, bounded
-      // checkpoint survives that omission and replaces older checkpoints instead of accumulating them.
-      const entries = checkpointDraft(event, turn);
+      // Native retry runs AFTER agent_end and omits the failed assistant. Keep the projection
+      // clean without adding any model-visible checkpoint text.
+      const entries = omitRecoveryArtifacts(omitInterrupted(event.entries, event, turn), event);
       return entries.length > event.entries.length ? { entries } : undefined;
     }
     // Normal tool turns continue natively. Do not inject Continue between every call and its answer.

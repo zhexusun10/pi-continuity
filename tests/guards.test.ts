@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Type, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { createHarness } from "./harness.ts";
 
 const truncated = () => fauxAssistantMessage("x".repeat(64), { stopReason: "length" });
@@ -15,7 +16,7 @@ test("invalid limits fail closed and surface a configuration error", async (t) =
   assert.match(h.errors[0]!, /continuity-max-resumes/);
 });
 
-test("checkpoint character limit fails closed above the safety cap", async (t) => {
+test("deprecated checkpoint character limit still validates compatibility", async (t) => {
   const h = await createHarness({ flags: { "continuity-checkpoint-max-chars": "64001" } });
   t.after(h.cleanup);
   h.setResponses([truncated(), fauxAssistantMessage("unused")]);
@@ -44,7 +45,7 @@ test("unlimited allows more than the default truncation continuation cap", async
   assert.deepEqual(h.errors, []);
 });
 
-test("zero stream retry flag leaves native retries unchanged and disables checkpoints", async (t) => {
+test("zero stream retry flag leaves native retries unchanged and adds no continuation", async (t) => {
   const h = await createHarness({ nativeRetries: 1, flags: { "continuity-stream-retries": "0" } });
   t.after(h.cleanup);
   const broken = () => fauxAssistantMessage("fragment", { stopReason: "error", errorMessage: "fetch failed" });
