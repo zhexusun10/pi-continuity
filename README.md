@@ -5,7 +5,7 @@
 [![CI](https://github.com/zhexusun10/pi-continuity/actions/workflows/ci.yml/badge.svg)](https://github.com/zhexusun10/pi-continuity/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/pi-continuity)](https://www.npmjs.com/package/pi-continuity)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Pi 1.5.0](https://img.shields.io/badge/tested-Pi%201.5.0-blue.svg)](https://pi.dev)
+[![Pi 1.5.2](https://img.shields.io/badge/tested-Pi%201.5.2-blue.svg)](https://pi.dev)
 
 [简体中文](docs/README.zh-CN.md) · [Design](docs/design.md) · [Evidence](docs/evidence.md) · [Source](extensions/index.ts)
 
@@ -21,7 +21,7 @@ These benchmark observations motivate a concrete engineering question: when a re
 pi install npm:pi-continuity
 ```
 
-`pi-continuity@0.4.0` is the latest npm release and supports Pi 1.5.0.
+The npm package **pi-continuity** supports **Pi 1.5.2**. This source tree builds **pi-continuity@0.5.0**.
 
 For a GitHub source install:
 
@@ -31,22 +31,23 @@ pi install git:github.com/zhexusun10/pi-continuity
 
 Then start a new Pi process or run `/reload` in an existing session. The package does not patch Pi, call providers directly, or install runtime dependencies.
 
-Requires **Pi 1.0.1+ with actionable session boundaries** and Node.js 22.19+. Validated against the latest **Pi 1.5.0**; the development dependencies are pinned to 1.5.0. It works in the Pi CLI and in SDK applications that load and bind the extension to the same `AgentSession` used for the model run.
+Requires **Pi 1.0.1+ with actionable session boundaries** and Node.js 22.19+. Validated against **Pi 1.5.2**; the development dependencies are pinned to 1.5.2. It works in the Pi CLI and in SDK applications that load and bind the extension to the same `AgentSession` used for the model run.
 
 ## What changes?
 
 | When Pi would stop | pi-continuity |
 | --- | --- |
-| `stopReason: "length"`: text, reasoning-only, empty, mixed, or tool-call output | Removes the interrupted assistant protocol from the next model projection and requests one next model turn at `turn_end`. Partial text/reasoning is not injected. |
-| A failed provider stream, including `errorMessage: "terminated"` or `"TypeError: terminated"` | Lets Pi's native session retry run first. After native recovery is exhausted, omits the failed assistant and requests another model turn with staged delays. No checkpoint or hidden prompt is injected. |
-| Provider usage limit with `Try again in ~N min.` (including ChatGPT/Codex login) | Waits the advertised minutes plus a 30-second rounding margin for `~`, then continues the same task through the public boundary. Applies to any provider/login with this error text. |
+| `stopReason: "length"`: text, reasoning-only, empty, mixed, or tool-call output | Omits the interrupted protocol and requests the next turn at `turn_end`. Partial text/reasoning is never injected. |
+| A failed provider stream, including `terminated` / `TypeError: terminated` | Lets native retry run first, then schedules bounded fallback if needed. No checkpoint or hidden prompt is injected. |
+| Explicit retry guidance: `cooldown: 12s`, `Try again in ~N min.`, `Retry-After`, etc. | Waits the advertised duration before native retry or fallback. Supports milliseconds through days, compounds, common minute misspellings, and explicit retry fields. |
 | Provider usage limit **without** a reset time (for example `Codex error: The usage limit has been reached`) | Polls every 10 minutes for up to 5 hours (30 attempts), then stops and leaves the raw failure in history. Once a window has been given up, later windows use 5 h 20 min (32 attempts) so the poll does not stop at the same instant the provider resets. Polling has its own bound and does not consume `--continuity-max-resumes`; `--continuity=false` or `--continuity-max-resumes=0` disables it. |
-| Successful but empty output | Omits the empty assistant response and requests another model turn using the bounded stream-recovery budget. |
+| Generic `Error: {"detail":"Bad Request"}`, missing error details, or unrecognized provider errors | Tries at most **2** extra recoveries by default, also consuming the shared stream and total budgets. Known permanent causes are excluded first. This is a bounded fallback, not evidence that a 400 error is transient. |
+| Successful but empty or reasoning-only output with no visible answer/tool call | Omits the incomplete assistant response and requests another model turn using the bounded stream-recovery budget. |
 | A run that ends with a tool call after the tool result | Keeps the completed tool result and requests one next model turn at `agent_before_settle`; it does not add a synthetic user instruction or rerun the tool. |
 
 The extension uses Pi's public session boundary API: `context_edit` repairs the next model projection and `continue: true` asks the `AgentSession` to call its next model turn. It does not inject a synthetic `Continue` user message, a hidden checkpoint, or any other model-visible prompt. Partial text/reasoning from the interrupted response is deliberately dropped; only append-only session metadata (which does not enter model context) is added for recovery accounting.
 
-An ordinary tool call already causes Pi to continue. The extension does not add an extra turn to every tool call. Normal final text, explicit aborts, authentication errors, safety rejections, and unknown deterministic errors are not retried. Billing/quota limits remain terminal; subscription usage limits without explicit retry guidance are polled every 10 minutes for at most 5 hours (5 h 20 min after a give-up). Input-context errors remain Pi's compaction responsibility. Clearly reported output-cap errors are supported when a provider represents them as `error` instead of `length`.
+An ordinary tool call already causes Pi to continue. The extension does not add an extra turn to every tool call. Normal final text, explicit aborts, authentication errors, safety rejections, and diagnosed permanent errors (including invalid parameters, expired credentials, certificate failures, and local programming errors) are not retried. Undiagnosed errors use the small unknown-error cap; `--continuity-unknown-retries=0` restores fail-closed behavior for them. Billing/quota limits remain terminal; subscription usage limits without explicit retry guidance are polled every 10 minutes for at most 5 hours (5 h 20 min after a give-up). Input-context errors remain Pi's compaction responsibility. Clearly reported output-cap errors are supported when a provider represents them as `error` instead of `length`.
 
 ## How it works
 
@@ -58,7 +59,9 @@ For an interrupted assistant response, the extension reads the projected session
 
 No checkpoint text, quoted partial, or hidden instruction from the interrupted response is added to model context. The next request sees the original task and any completed tool results, with broken protocol blocks omitted. Reasoning in earlier completed assistant turns is not stripped by this extension.
 
-Pi's native retry runs before `agent_before_settle`. The extension does not save partial context for it. If native recovery is exhausted, the extension uses the same public boundary mechanism for its fallback.
+All extension-owned waits run at `turn_end`, where the public cancellation signal is live; settlement never sleeps. Short stream/empty/unknown recovery uses the staged delay and spending caps, with a separate default ceiling of 2 unknown-error attempts. Native retry still gets first refusal after waiting and may apply its own backoff, so native-recognized errors can wait longer than with Pi alone. Cancellation, queued input, or disabling recovery interrupts the wait; directly queued work is polled once per second. Error-turn `continue` alone cannot replace the wait because core hard-exits finalized errors. Settlement respects pending continuations.
+
+When input is queued after an error, the assistant tail is retained until Pi selects that input, then omitted by the context hook. This avoids delaying follow-up input by an extra old-task request, without injecting partial text or hidden instructions.
 
 A truncated tool call is never executed by this extension and is omitted from the next model projection. Pi's core handles truncated tool calls safely; the model must re-issue any still-needed work with complete arguments. A completed tool result remains available for tool-tail recovery.
 
@@ -66,9 +69,21 @@ The session history is append-only. `context_edit` changes model projection, not
 
 ## Usage limits
 
-**Advertised reset.** For example, `You have hit your ChatGPT usage limit (plus plan). Try again in ~120 min.` pauses recovery for 120 minutes plus 30 seconds, then continues the existing task. Pi rounds Codex reset minutes to the nearest integer; the margin prevents an early request and rapid budget exhaustion on `~0 min.`. Exact `Try again in 120 min.` waits 120 minutes without the margin. `Retry in N mins/minutes` is also recognized. No provider ID, API key, login method, or plan is hardcoded.
+**Advertised cooldown/reset.** Explicit finalized error guidance such as `cooldown: 12s`, `retry in ...`, `retry after ...`, `try again in ...`, `please wait ...`, and `reset in ...` is recognized independently of provider or login. Colons (`:`/`：`), `=`, spaces, case differences, and common key naming styles are supported.
 
-**No advertised reset.** Some transport paths expose the same limit without a reset time (for example a Codex mid-stream `Codex error: The usage limit has been reached`). The extension then polls: it waits 10 minutes, continues the same task, and repeats until the provider answers or the 5-hour window (30 attempts) is exhausted. A provider's usage window is commonly 5 h, so the first window matches it exactly; once a window has been given up, later windows add a buffer and use 5 h 20 min (32 attempts), so the poll does not stop at the same instant the provider resets. Polling has its own bound and does not consume `--continuity-max-resumes`, but `--continuity=false` and `--continuity-max-resumes=0` disable it. Missing, negative, non-finite, or unsafe minute counts fall back to this polling path.
+| Unit | Accepted forms |
+| --- | --- |
+| Milliseconds | `ms`, `msec`, `msecs`, `millisecond(s)` |
+| Seconds | `s`, `sec`, `secs`, `second(s)` |
+| Minutes | `m`, `min`, `mins`, `minute(s)`; common typos `miutes`, `minuites`, `mintues` |
+| Hours | `h`, `hr`, `hrs`, `hour(s)` |
+| Days | `d`, `day(s)` |
+
+Examples: `cooldown: 0.25s`, `cooldown is 2miutes`, `retry in 1h2min3s`, and `retry after 1 hour, 2 minutes and 3 seconds`. Decimal durations are rounded up to whole milliseconds. JSON fields such as `retry_after`, `retryAfterMs`, `cooldown_seconds`, `retry_after_minutes`, and `retryDelay: "3.5s"` are supported: a unit suffix specifies the numeric field's unit. Unitless `Retry-After: 120` / `retry_after: 120` means seconds; bare `cooldown: 120` is ambiguous and is not accepted. `Retry-After` also accepts an RFC-style HTTP date, but arbitrary date strings and unrelated timeout/request-ID numbers are not inferred.
+
+Exact values wait their stated duration. Approximate `~`, `≈`, `about`, or `approximately` adds half the smallest advertised unit as rounding margin: `~2 min` adds 30 seconds; `~2 s` adds 500 ms. This retains Pi/Codex's 30-second margin for `Try again in ~N min.`. When several valid hints appear, the longest delay wins. Negative/non-finite/unsafe values, malformed compounds, scientific notation, and unsupported units such as months are rejected.
+
+**No advertised reset.** Some transport paths expose the same limit without a reset time (for example a Codex mid-stream `Codex error: The usage limit has been reached`). The extension then polls: it waits 10 minutes, continues the same task, and repeats until the provider answers or the 5-hour window (30 attempts) is exhausted. A provider's usage window is commonly 5 h, so the first window matches it exactly; once a window has been given up, later windows add a buffer and use 5 h 20 min (32 attempts), so the poll does not stop at the same instant the provider resets. Polling has its own bound and does not consume `--continuity-max-resumes`, but `--continuity=false` and `--continuity-max-resumes=0` disable it. Missing or invalid duration guidance on a recognized usage-limit error falls back to this polling path.
 
 The wait runs at `turn_end`, while Pi's public cancellation signal is still active, **before** native retries can ignore the reset time. After waiting, native recovery gets first refusal; otherwise `agent_before_settle` requests the next model turn. Escape/SDK abort, `/pi-continuity off`, new input, session reset, or shutdown interrupts the wait. Directly queued SDK input is checked at least once per second. `/pi-continuity status` shows the remaining wait and poll progress. Keep Pi running; restart/reload does not restore a pending timer.
 
@@ -83,15 +98,16 @@ Timed-limit continuations count toward `--continuity-max-resumes`, not the strea
 /pi-continuity on
 ```
 
-`status` reports recovery counts for the current or last user request without printing partial content. Toggling applies to the current loaded session; `/reload` restores CLI defaults. Turning the extension off stops future extension recovery but does not remove persisted history or disable Pi's native retry setting. Legacy pi-continuity checkpoint messages are still omitted from model context when recovery is off; raw history is unchanged.
+`status` reports counts without partial content. Toggling applies to the loaded session; `/reload` restores CLI defaults. Invalid flags keep recovery disabled even after `/pi-continuity on`; fix the configuration and reload. Turning recovery off does not erase history or disable native retry. Legacy pi-continuity prompt artifacts are still excluded from model context when recovery is off, zero-budgeted, or fails closed.
 
 | CLI flag | Default | Meaning |
 | --- | ---: | --- |
 | `--continuity` | `true` | Enable extension recovery. Use `--continuity=false` to disable it. |
 | `--continuity-max-resumes` | `16` | Maximum extension-scheduled model turns per actual user request. `0` disables extension recovery; `unlimited` removes this total cap. |
-| `--continuity-stream-retries` | `12` | Extra stream/empty-response recoveries after native retry. The default schedule is three attempts at 5 seconds, then nine attempts at 10 seconds. `0` disables this fallback. |
-| `--continuity-stream-delay-ms` | `5000` | Base delay for extra stream/empty-response recoveries. Attempts 1–3 use this value; later attempts use 2x, capped at 10 seconds. |
-| `--continuity-checkpoint-max-chars` | `12000` | **Deprecated no-op.** Checkpoint/prompt context is never injected. The old 64000 upper bound is still validated for script compatibility. |
+| `--continuity-stream-retries` | `12` | Shared cap for extra stream/empty/unknown recoveries after native retry. Default phases: 3 attempts at 5 seconds, then 9 at 10 seconds. `0` disables these fallbacks. |
+| `--continuity-unknown-retries` | `2` | Additional cap for undiagnosed errors, also bounded by stream/total caps even with `max-resumes=unlimited`. `0` disables unknown-error recovery. |
+| `--continuity-stream-delay-ms` | `5000` | Live-boundary delay before native recovery or fallback. Extension attempts 1–3 use the base; later phases use 2x, capped at 10 seconds. |
+| `--continuity-checkpoint-max-chars` | `12000` | **Deprecated no-op.** No checkpoint/prompt is injected; the old `64000` upper bound is still validated for compatibility. |
 | `--continuity-tool-tail` | `true` | Recover a settled tool-call ending. Set `false` for intentionally terminal structured-output or handoff tools. |
 
 Boolean flags take explicit values such as `--continuity=false`; they are not presence-only flags. Usage-limit polling is bounded separately at 30 attempts within 5 hours (32 attempts within 5 h 20 min once a window has been given up); use `--continuity=false` or `--continuity-max-resumes=0` to disable it.
@@ -118,10 +134,10 @@ Budgets reset on an actual new user request, not on every `agent_start` emitted 
 
 - A recovery turn is a fresh model request. It does not restore provider decoder state or guarantee exact continuation from a token boundary.
 - A model can still repeat work, miss context, or stop incorrectly. Check task results independently.
-- Provider-specific error wording differs. The classifier covers Pi's retry classifier and common HTTP/transport failures while remaining conservative for unknown deterministic errors.
+- Provider-specific error wording differs. The classifier covers Pi's retry classifier and common HTTP/transport failures; new or ambiguous errors receive only the small unknown-error budget. Persistent bad requests may require configuration or provider fixes, not more retries.
 - The extension cannot recover a killed process, a provider stream that never finalizes, an unbounded tool, content the provider never exposed, or exhausted credits.
-- The extension does not inject partial text/reasoning into model context. Raw session history may still contain sensitive content; treat session files as sensitive.
-- Other extensions can replace boundary drafts or continuation decisions. Load order is a composition boundary, especially for redaction.
+- No partial text/reasoning, checkpoint, or other hidden prompt is injected. Raw history can still contain sensitive content.
+- Other extensions can replace boundary drafts or continuation decisions. Load order remains a composition boundary.
 
 The benchmark figures above are the paper's Terminal-Bench 4.0 results. This repository's deterministic suite and in-memory AgentSession tests validate extension control flow and package loading; the source attribution and methodology are collected in [evidence.md](docs/evidence.md).
 
@@ -136,7 +152,7 @@ npm pack --dry-run
 pi -e .
 ```
 
-Tests use Pi's real `AgentSession` and in-memory faux provider. They make no real model requests and use no API keys or paid provider calls. The suite covers output-cap shapes, native retry ordering, fallback budgets, staged delays, virtual five-hour usage-limit waits, 10-minute guidance-less polling and its give-up and extended windows, reset rounding, cancellation, queued input, protocol omissions, tool execution safety, and package loading.
+Tests use Pi's real `AgentSession` and in-memory faux provider. They make no real model requests and use no API keys or paid provider calls. The suite covers generic Bad Request and unknown-error caps, reasoning-only completion, terminal-cause exclusions, output-cap shapes, native retry ordering, fallback budgets, staged delays, virtual five-hour usage-limit waits, 10-minute guidance-less polling and its give-up and extended windows, reset rounding, cancellation, queued input, protocol omissions, tool execution safety, and package loading.
 
 The repository also contains optional illustration tooling. See [docs/assets.md](docs/assets.md) to regenerate the PNG/GIF/MP4 storyboard. It does not run Pi or access a provider.
 

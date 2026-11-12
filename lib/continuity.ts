@@ -1,11 +1,15 @@
 import { isContextOverflow, isRetryableAssistantError, type AssistantMessage } from "@earendil-works/pi-ai";
+import { retryDelayMs } from "./retry-delay.ts";
 
-export type RecoveryReason = "truncation" | "stream-error" | "usage-limit" | "empty-response" | "tool-tail";
+export { APPROXIMATE_RESET_BUFFER_MS, formatDelayMs, retryDelayMs } from "./retry-delay.ts";
+
+export type RecoveryReason = "truncation" | "stream-error" | "unknown-error" | "usage-limit" | "empty-response" | "tool-tail";
 
 export interface ContinuityOptions {
   enabled: boolean;
   maxResumes: number;
   streamRetries: number;
+  unknownRetries: number;
   streamDelayMs: number;
   /** @deprecated Retained for option compatibility; checkpoint text is never injected. */
   checkpointMaxChars: number;
@@ -17,21 +21,45 @@ export const DEFAULT_CHECKPOINT_MAX_CHARS = 12_000;
 /** @deprecated Retained for CLI validation compatibility; checkpoint text is never injected. */
 export const MAX_CHECKPOINT_CHARS = 64_000;
 export const DEFAULT_STREAM_RETRIES = 12;
+export const DEFAULT_UNKNOWN_RETRIES = 2;
 export const DEFAULT_STREAM_DELAY_MS = 5_000;
 export const EXTENDED_STREAM_DELAY_MS = 10_000;
 export const DEFAULT_OPTIONS: Readonly<ContinuityOptions> = Object.freeze({
-  enabled: true, maxResumes: 16, streamRetries: DEFAULT_STREAM_RETRIES, streamDelayMs: DEFAULT_STREAM_DELAY_MS,
+  enabled: true, maxResumes: 16, streamRetries: DEFAULT_STREAM_RETRIES, unknownRetries: DEFAULT_UNKNOWN_RETRIES,
+  streamDelayMs: DEFAULT_STREAM_DELAY_MS,
   checkpointMaxChars: DEFAULT_CHECKPOINT_MAX_CHARS, toolTail: true,
 });
 export const MAX_STREAM_DELAY_MS = EXTENDED_STREAM_DELAY_MS;
 export const CONTINUATION_TYPE = "pi-continuity";
 export const CHECKPOINT_TYPE = "pi-continuity-checkpoint";
 
+const PERMANENT_HTTP_STATUS = new Set([401, 402, 403, 404, 405, 407, 410, 413, 415, 422, 451, 501, 505]);
+
+/** SDK prefixes or explicit status fields only, not request IDs, byte counts, or reset minutes. */
+function httpErrorStatus(error: string): number | undefined {
+  const match = /^(?:(?:[a-z]*Error|HTTP(?:\/[\d.]+)?)[:\s]+)*([45]\d{2})(?=\s|[;:,)\]}]|$)/i.exec(error) ??
+    /\b(?:HTTP(?:\/\d(?:\.\d)?)?(?:[\s_-]+(?:error|status))?|status(?:[\s_-]*code)?|httpStatusCode)["']?\s*[:=(]?\s*["']?([45]\d{2})\b/i.exec(error) ??
+    /\b(?:API|provider) error\s*(?:\(\s*|:\s*)([45]\d{2})\b/i.exec(error);
+  return match ? Number(match[1]) : undefined;
+}
+
 const PERMANENT_ERROR = [
-  /\b(?:401|402|403)\b(?!\s*min(?:s|utes?)?\b)/i, /unauthori[sz]ed|forbidden|authentication/i,
-  /invalid.?api.?key|permission.?denied/i,
+  /unauthori[sz]ed|forbidden|authentication/i,
+  /(?:invalid|missing|no)[\s_-]*(?:api[\s_-]*)?key\b|permission.?denied/i,
+  /(?:access[\s_-]*|refresh[\s_-]*|auth[\s_-]*)token[\s_-]*(?:has[\s_-]*)?(?:expired|invalid|revoked)/i,
+  /(?:expired|invalid|revoked)[\s_-]*(?:access|refresh|auth)[\s_-]*token/i,
+  /(?:please|must|need to)\s+(?:log[ -]?in|sign[ -]?in)|login.?required|session.?expired/i,
   /content.?filter|safety|policy.?violation/i,
   /invalid.?request|invalid.?argument|invalid.?param|not[\s_-]+found|not_found|not.?supported/i,
+  /missing[\s_-]+(?:required[\s_-]+)?(?:param(?:eter)?|field)|unsupported[\s_-]+(?:param(?:eter)?|model|media|value|role)/i,
+  /invalid[\s_-]+(?:max_(?:output_|completion_)?tokens|temperature|top_p|model|schema|tool|role)\b/i,
+  /unprocessable[\s_-]+(?:entity|content)|validation[\s_-]+(?:error|failed)|malformed[\s_-]+(?:request|payload)/i,
+  // A finalized error is not permission to retry explicit cancellation or local programming bugs.
+  /\bAbortError\b/i,
+  /^(?:(?:Error|TypeError):\s*)?(?:aborted|cancelled|canceled)[.!]?$/i,
+  /\buser[\s_-]+(?:cancel(?:led|ed)|aborted)\b|\b(?:cancel(?:led|ed)|aborted) by (?:the )?user\b/i,
+  /\b(?:request|operation) (?:was )?(?:aborted|cancel(?:led|ed))\b(?! by (?:the )?(?:server|upstream|peer))/i,
+  /\b(?:TypeError:.*(?:cannot read|cannot set|is not a function)|ReferenceError:)/i,
   // Certificate validation is deterministic even when wrapped as "TLS handshake
   // failed: ...": retrying the same request against the same expired or untrusted
   // certificate cannot succeed. Checked before the broad TLS/network transient
@@ -48,7 +76,6 @@ const TERMINAL_ACCOUNT_ERROR = /insufficient_quota|quota.?exceeded|out of budget
 const USAGE_LIMIT_ERROR = /usage.?limit/i;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 const WAIT_POLL_MS = 1_000;
-export const APPROXIMATE_RESET_BUFFER_MS = 30_000;
 
 /**
  * Guidance-less subscription/usage limits (for example a Codex mid-stream
@@ -68,18 +95,12 @@ export const EXTENDED_USAGE_POLL_WINDOW_MS = USAGE_POLL_WINDOW_MS + 20 * 60_000;
 export const USAGE_POLL_MAX_ATTEMPTS = Math.ceil(USAGE_POLL_WINDOW_MS / USAGE_POLL_DELAY_MS);
 export const EXTENDED_USAGE_POLL_MAX_ATTEMPTS = Math.ceil(EXTENDED_USAGE_POLL_WINDOW_MS / USAGE_POLL_DELAY_MS);
 
-/** Provider-independent: only explicit minute-based retry guidance authorizes a timed limit recovery. */
+/** Backwards-compatible name for provider-independent explicit retry guidance. */
 export function usageLimitDelayMs(error: string): number | undefined {
-  const match = /\b(?:try again|retry) in\s+(~?)\s*(\d+(?:\.\d+)?)\s*min(?:s|utes?)?\b/i.exec(error);
-  if (!match) return undefined;
-  // Pi rounds Codex reset minutes to the nearest integer. The ~ form can be
-  // almost 30 seconds early; without this margin, ~0 min can exhaust the budget.
-  const delay = Math.ceil(Number(match[2]) * 60_000) + (match[1] ? APPROXIMATE_RESET_BUFFER_MS : 0);
-  return Number.isSafeInteger(delay) && Number.isSafeInteger(Date.now() + delay) ? delay : undefined;
+  return retryDelayMs(error);
 }
 
 const TRANSIENT_ERROR = [
-  /\b(?:429|500|502|503|504|52[0-6])\b/i,
   /overloaded|at capacity|high demand|rate.?limit|too many requests|service.?unavailable|temporarily unavailable|server.?error|internal.?error/i,
   /bad gateway|gateway timeout|temporarily overloaded|engine overloaded|system is busy|model is busy|server is busy/i,
   /ECONNRESET|ECONNREFUSED|ECONNABORTED|ETIMEDOUT|EPIPE|ENOTFOUND|EAI_AGAIN|UND_ERR_|ERR_HTTP2_|ERR_STREAM_|ERR_NETWORK_CHANGED/i,
@@ -89,6 +110,7 @@ const TRANSIENT_ERROR = [
   /socket hang up|socket connection was closed|websocket.?closed|websocket.?error|reset before headers/i,
   /premature (?:close|end)|unexpected (?:EOF|end of (?:stream|input|JSON))/i,
   /incomplete (?:stream|chunk|response)|stream ended without|stream ended before|http2 request did not get a response/i,
+  /no response body|empty response body/i,
   // Bare "stream error" wrappers (for example Go HTTP/2 relays reporting
   // "stream error: stream ID 1; PROTOCOL_ERROR; received from peer", or a
   // proxy's "Stream error occurred") carry no status code. Permanent/auth/
@@ -96,6 +118,7 @@ const TRANSIENT_ERROR = [
   // still excluded.
   /\bstream error\b/i,
   /RST_STREAM|GOAWAY|PROTOCOL_ERROR|aborted by the (?:server|upstream)/i,
+  /\b(?:stream|request|connection).*cancel(?:led|ed) by (?:the )?(?:server|upstream|peer)/i,
   /timed? out|timeout|terminated|resource.?exhausted|please retry|try your request again/i,
   /(?:stream|connection|socket|websocket).*(?:disconnect|interrupt|closed|closing|reset|EOF|end(?:ed|ing)? unexpectedly)/i,
 ];
@@ -114,14 +137,20 @@ export function recoveryReason(message: AssistantMessage): RecoveryReason | unde
   if (message.stopReason === "error") {
     const error = typeof message.errorMessage === "string" ? message.errorMessage.trim() : "";
     if (isContextOverflow(message)) return undefined; // Pi owns compact-and-retry.
-    if (PERMANENT_ERROR.some((pattern) => pattern.test(error))) return undefined;
-    if (usageLimitDelayMs(error) !== undefined) return "usage-limit";
+    const status = httpErrorStatus(error);
+    if ((status !== undefined && PERMANENT_HTTP_STATUS.has(status)) ||
+      PERMANENT_ERROR.some((pattern) => pattern.test(error))) return undefined;
+    if (retryDelayMs(error) !== undefined) return "usage-limit";
     if (TERMINAL_ACCOUNT_ERROR.test(error)) return undefined;
     // Subscription usage limits without an advertised reset fall back to bounded polling.
     if (USAGE_LIMIT_ERROR.test(error)) return "usage-limit";
     if (OUTPUT_TRUNCATION.some((pattern) => pattern.test(error))) return "truncation";
-    if (isRetryableAssistantError(message) || TRANSIENT_ERROR.some((pattern) => pattern.test(error))) return "stream-error";
-    return undefined;
+    if ((status !== undefined && ([408, 409, 425, 429].includes(status) || status >= 500)) ||
+      isRetryableAssistantError(message) || TRANSIENT_ERROR.some((pattern) => pattern.test(error))) return "stream-error";
+    // A generic 400/Bad Request, missing diagnostic, or new provider wording is
+    // not proof of a permanent cause. Give it a smaller, separate retry cap;
+    // never pretend it is a known transient failure or rewrite raw history.
+    return "unknown-error";
   }
   if (message.stopReason !== "stop" && message.stopReason !== "toolUse") return undefined;
   if (!Array.isArray(message.content)) return "empty-response";
@@ -132,7 +161,9 @@ export function recoveryReason(message: AssistantMessage): RecoveryReason | unde
     return true;
   });
   if (last?.type === "toolCall") return "tool-tail";
-  if (!last) return "empty-response";
+  if (!last || (last.type === "thinking" && !message.content.some((block) =>
+    block && typeof block === "object" && (block.type === "toolCall" ||
+      (block.type === "text" && typeof block.text === "string" && block.text.trim()))))) return "empty-response";
   return undefined;
 }
 
@@ -160,7 +191,8 @@ export function limitPartial(partial: string, maxChars = DEFAULT_CHECKPOINT_MAX_
   const available = maxChars - PARTIAL_OMISSION_MARKER.length;
   if (available <= 0) return partial.slice(0, maxChars);
   const head = Math.ceil(available * 0.6);
-  return partial.slice(0, head) + PARTIAL_OMISSION_MARKER + partial.slice(-(available - head));
+  const tail = available - head;
+  return partial.slice(0, head) + PARTIAL_OMISSION_MARKER + (tail > 0 ? partial.slice(-tail) : "");
 }
 
 /** @deprecated Retained for API compatibility; the extension never injects this content. */
@@ -193,21 +225,29 @@ export function streamDelay(base: number, attempt: number): number {
   return Math.min(phaseDelay, MAX_STREAM_DELAY_MS);
 }
 
+/** All short fallbacks share the existing stream and total spending limits. */
+export function usesStreamBudget(reason: RecoveryReason): boolean {
+  return reason === "stream-error" || reason === "empty-response" || reason === "unknown-error";
+}
+
 /** A budget belongs to an actual user request, not each native retry's agent_start. */
 export class RecoveryBudget {
   total = 0;
   streams = 0;
-  counts: Record<RecoveryReason, number> = { truncation: 0, "stream-error": 0, "usage-limit": 0, "empty-response": 0, "tool-tail": 0 };
+  counts: Record<RecoveryReason, number> = {
+    truncation: 0, "stream-error": 0, "unknown-error": 0, "usage-limit": 0, "empty-response": 0, "tool-tail": 0,
+  };
 
   canResume(reason: RecoveryReason, options: ContinuityOptions): boolean {
     if (!options.enabled || this.total >= options.maxResumes) return false;
-    return (reason !== "stream-error" && reason !== "empty-response") || this.streams < options.streamRetries;
+    if (reason === "unknown-error" && this.counts[reason] >= options.unknownRetries) return false;
+    return !usesStreamBudget(reason) || this.streams < options.streamRetries;
   }
 
   record(reason: RecoveryReason): void {
     this.total++;
     this.counts[reason]++;
-    if (reason === "stream-error" || reason === "empty-response") this.streams++;
+    if (usesStreamBudget(reason)) this.streams++;
   }
 }
 

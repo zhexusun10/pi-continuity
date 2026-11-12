@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.5.0] - 2026-11-13
+
+### Added
+
+- Bounded recovery for generic `Error: {"detail":"Bad Request"}`, missing diagnostics, and unknown provider errors. `--continuity-unknown-retries` defaults to 2, also consuming the shared stream and total budgets.
+- Explicit cooldown/retry parsing for milliseconds through days, `h`/`s`/`min`/`miutes` and common aliases, compound/fractional durations, unit-suffixed snake/kebab/camel fields, numeric Retry-After seconds, and RFC-style Retry-After dates. Use the longest valid hint; reject malformed or unrelated numbers and preserve approximate-minute margins.
+- Unit-appropriate status output and deterministic regression coverage for parsing, budgets, cancellation, no prompt injection, raw history/usage, and queue ordering.
+
+### Changed
+
+- Validate and pin development dependencies to **Pi 1.5.2**, retaining host-provided runtime peers and the 0.4.0 no-prompt-injection policy.
+- Move all extension-owned waits to live `turn_end`; settlement no longer sleeps. Native recovery still gets first refusal after waiting and can add its own backoff, increasing delay relative to Pi alone.
+- Preserve the error assistant tail until queued input is selected, then omit its broken protocol at request time. No partial text, hidden checkpoint, or interrupted-tool note is replayed.
+
+### Fixed
+
+- Recover successful reasoning-only responses with no visible answer/tool call using the bounded empty-response policy.
+- Distinguish user/request cancellation from transient HTTP/2 cancellation; classify HTTP status from explicit prefixes/fields rather than request IDs, byte counts, or reset minutes.
+- Prevent `/pi-continuity on` from bypassing invalid configuration and record input interruption before asynchronous enqueue.
+- Sanitize native truncated-tool continuations even after extension budget exhaustion, without adding a continuation or leaving orphan results. Zero total cap leaves native protocol filtering to Pi while still excluding legacy prompt artifacts.
+- Retire active content-edited/restored legacy artifacts while avoiding duplicate omissions. Fix zero-tail character bounds in deprecated compatibility helpers.
+
 ## [0.4.0] - 2026-11-05
 
 ### Changed

@@ -16,6 +16,16 @@ test("invalid limits fail closed and surface a configuration error", async (t) =
   assert.match(h.errors[0]!, /continuity-max-resumes/);
 });
 
+test("invalid unknown retry limit also fails closed", async (t) => {
+  const h = await createHarness({ flags: { "continuity-unknown-retries": "-1" } });
+  t.after(h.cleanup);
+  h.setResponses([fauxAssistantMessage([], { stopReason: "error", errorMessage: "Bad Request" }), fauxAssistantMessage("unused")]);
+  await h.session.prompt("Task");
+  assert.equal(h.requests.length, 1);
+  assert.equal(h.continuations().length, 0);
+  assert.match(h.errors[0]!, /continuity-unknown-retries/);
+});
+
 test("deprecated checkpoint character limit still validates compatibility", async (t) => {
   const h = await createHarness({ flags: { "continuity-checkpoint-max-chars": "64001" } });
   t.after(h.cleanup);

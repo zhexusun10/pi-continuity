@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { getEventListeners } from "node:events";
-import test, { type TestContext } from "node:test";
-import { clearTimeout as nodeClearTimeout, setTimeout as nodeSetTimeout } from "node:timers";
+import test from "node:test";
 import { setImmediate } from "node:timers/promises";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
@@ -10,6 +9,7 @@ import {
   RecoveryBudget, USAGE_POLL_DELAY_MS, USAGE_POLL_MAX_ATTEMPTS, USAGE_POLL_WINDOW_MS, recoveryReason, usageLimitDelayMs,
   waitForBackoff,
 } from "../lib/continuity.ts";
+import { fakeClock, until } from "./clock.ts";
 import { allText, createHarness } from "./harness.ts";
 
 const usageError = (minutes = 300, content = "partial plan", approximate = true) => fauxAssistantMessage(content, {
@@ -20,46 +20,6 @@ const usageError = (minutes = 300, content = "partial plan", approximate = true)
 const pollError = (content = "partial plan") => fauxAssistantMessage(content, {
   stopReason: "error", errorMessage: "Codex error: The usage limit has been reached",
 });
-
-/** Virtual wall clock without experimental MockTimers or real minute/hour waits. */
-function fakeClock(t: TestContext) {
-  let now = 1_800_000_000_000;
-  const timers = new Map<ReturnType<typeof setTimeout>, { at: number; run: () => void }>();
-  const delays: number[] = [];
-  t.mock.method(Date, "now", () => now);
-  t.mock.method(globalThis, "setTimeout", (callback: (...args: unknown[]) => void, delay = 0, ...args: unknown[]) => {
-    const timer = nodeSetTimeout(() => {}, 0);
-    nodeClearTimeout(timer);
-    timers.set(timer, { at: now + delay, run: () => callback(...args) });
-    delays.push(delay);
-    return timer;
-  });
-  t.mock.method(globalThis, "clearTimeout", (timer: ReturnType<typeof setTimeout> | string | number | undefined) => {
-    if (typeof timer === "object") timers.delete(timer);
-    nodeClearTimeout(timer);
-  });
-  return {
-    delays,
-    pending: () => timers.size,
-    advance(ms: number) {
-      now += ms;
-      for (;;) {
-        const due = [...timers].find(([, timer]) => timer.at <= now);
-        if (!due) return;
-        timers.delete(due[0]);
-        due[1].run();
-      }
-    },
-  };
-}
-
-async function until(predicate: () => boolean): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt++) {
-    if (predicate()) return;
-    await setImmediate();
-  }
-  assert.ok(predicate(), "expected asynchronous boundary state was not reached");
-}
 
 for (const [error, minutes] of [
   ["You have hit your ChatGPT usage limit (plus plan). Try again in ~120 min.", 120],
@@ -81,7 +41,7 @@ for (const [error, minutes] of [
 for (const errorMessage of [
   "You have hit your ChatGPT usage limit.", "Try again in ~N min.", "Try again in -5 min.",
   "Try again in Infinity min.", "Try again in NaN min.", "Try again in 1e3 min.",
-  "Try again in 9007199254740992 min.", "Try again in 2 seconds.", "Try again in 2 hours.",
+  "Try again in 9007199254740992 min.", "Try again in 2 months.", "Try again in 2 widgets.",
 ]) {
   test(`missing/invalid guidance falls back to bounded polling: ${errorMessage}`, () => {
     assert.equal(usageLimitDelayMs(errorMessage), undefined);

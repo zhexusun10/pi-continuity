@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { fauxAssistantMessage, fauxThinking, fauxToolCall } from "@earendil-works/pi-ai";
 import {
-  DEFAULT_CHECKPOINT_MAX_CHARS, DEFAULT_OPTIONS, DEFAULT_STREAM_DELAY_MS, DEFAULT_STREAM_RETRIES, RecoveryBudget, limitPartial, mergePartial, parseBoolean, parseCount,
+  DEFAULT_CHECKPOINT_MAX_CHARS, DEFAULT_OPTIONS, DEFAULT_STREAM_DELAY_MS, DEFAULT_STREAM_RETRIES, DEFAULT_UNKNOWN_RETRIES,
+  RecoveryBudget, limitPartial, mergePartial, parseBoolean, parseCount,
   readablePartial, recoveryReason, streamDelay, waitForBackoff,
 } from "../lib/continuity.ts";
 
@@ -19,6 +20,7 @@ for (const error of [
   "ERR_HTTP2_STREAM_ERROR", "RST_STREAM", "GOAWAY", "connection reset by peer", "bad gateway", "gateway timeout",
   "ENOTFOUND api.example.com", "503 service unavailable", "429 rate limit exceeded", "521 web server is down",
   "522 connection timed out", "524 a timeout occurred", "525 SSL handshake failed",
+  "408 Request Timeout", "409 Conflict", "425 Too Early", "529 overload", "No response body",
   "terminated", "Error: terminated", "TypeError: terminated",
   "Stream error occurred",
   "stream error: stream ID 1; PROTOCOL_ERROR; received from peer",
@@ -33,7 +35,7 @@ for (const error of [
   "401 authentication failed", "403 forbidden", "429 insufficient_quota",
   "billing exhausted", "quota exceeded", "Invalid API key; please retry your request",
   "context_length_exceeded; please retry your request", "prompt is too long",
-  "content_filter", "400 invalid request; stream closed", "Unknown deterministic failure",
+  "content_filter", "400 invalid request; stream closed", "422 validation failed",
   "model not found", "invalid max_tokens value",
   "stream error: invalid API key",
   "stream error: 401 authentication failed",
@@ -94,7 +96,9 @@ test("tool-tail means the last substantive block, not the presence of any tool c
   assert.equal(recoveryReason(fauxAssistantMessage([tool, { type: "text", text: "  " }])), "tool-tail");
   assert.equal(recoveryReason(fauxAssistantMessage([])), "empty-response");
   assert.equal(recoveryReason(fauxAssistantMessage("   ")), "empty-response");
-  assert.equal(recoveryReason(fauxAssistantMessage(fauxThinking("a complete private thought"))), undefined);
+  assert.equal(recoveryReason(fauxAssistantMessage(fauxThinking("no visible answer"))), "empty-response");
+  assert.equal(recoveryReason(fauxAssistantMessage({ type: "thinking", thinking: "hidden", redacted: true })), "empty-response");
+  assert.equal(recoveryReason(fauxAssistantMessage([fauxThinking("thought"), { type: "text", text: "done" }])), undefined);
 });
 
 test("deprecated partial helpers remain compatible", () => {
@@ -131,6 +135,27 @@ test("total and stream budgets do not reset on successful tool progress", () => 
   assert.equal(new RecoveryBudget().canResume("truncation", { ...options, maxResumes: 0 }), false);
   assert.equal(budget.canResume("truncation", { ...options, maxResumes: Infinity }), true);
 });
+
+test("unknown errors have a separate small cap inside the shared spending budgets", () => {
+  assert.equal(DEFAULT_OPTIONS.unknownRetries, DEFAULT_UNKNOWN_RETRIES);
+  assert.equal(DEFAULT_UNKNOWN_RETRIES, 2);
+  const budget = new RecoveryBudget();
+  const options = { ...DEFAULT_OPTIONS, maxResumes: Infinity };
+  budget.record("unknown-error");
+  assert.equal(budget.streams, 1);
+  assert.equal(budget.canResume("unknown-error", options), true);
+  budget.record("unknown-error");
+  assert.equal(budget.canResume("unknown-error", options), false);
+  assert.equal(budget.canResume("stream-error", options), true);
+  assert.equal(new RecoveryBudget().canResume("unknown-error", { ...options, streamRetries: 0 }), false);
+  assert.equal(new RecoveryBudget().canResume("unknown-error", { ...options, unknownRetries: 0 }), false);
+});
+
+for (const errorMessage of ['Error: {"detail":"Bad Request"}', "400 Bad Request", "unknown error", "", undefined]) {
+  test(`unknown error classifier: ${JSON.stringify(errorMessage)}`, () => {
+    assert.equal(recoveryReason(fauxAssistantMessage([], { stopReason: "error", errorMessage })), "unknown-error");
+  });
+}
 
 test("flags reject invalid limits instead of silently enabling more requests", () => {
   assert.equal(parseCount(undefined, "count", 3), 3);

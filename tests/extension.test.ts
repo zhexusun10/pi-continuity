@@ -198,7 +198,7 @@ test("empty successful responses get bounded recovery", async (t) => {
   assert.equal(h.continuations().length, 1);
 });
 
-for (const errorMessage of ["401 invalid API key", "insufficient_quota", "context_length_exceeded", "content_filter", "unknown error"]) {
+for (const errorMessage of ["401 invalid API key", "insufficient_quota", "context_length_exceeded", "content_filter", "400 invalid parameter"]) {
   test(`no retry/checkpoint for permanent error: ${errorMessage}`, async (t) => {
     const h = await createHarness();
     t.after(h.cleanup);
@@ -272,7 +272,9 @@ test("stale recovery artifacts are filtered before a new user request", async (t
   assert.match(allText(h.requests[1]!), /Second task/);
 });
 
-const legacyFlagCases: Record<string, string | boolean>[] = [{}, { continuity: "false" }];
+const legacyFlagCases: Record<string, string | boolean>[] = [
+  {}, { continuity: "false" }, { "continuity-max-resumes": "0" }, { "continuity-max-resumes": "-1" },
+];
 for (const flags of legacyFlagCases) {
   test(`legacy recovery artifacts are never injected: ${JSON.stringify(flags)}`, async (t) => {
     const h = await createHarness({ flags });

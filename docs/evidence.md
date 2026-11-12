@@ -1,6 +1,6 @@
-# Research basis: loop engineering
+# Evidence and validation
 
-This document records two connected evidence sources: the paper's Terminal-Bench 4.0 benchmark analysis, which supplies the empirical reason for recovery, and this repository's deterministic AgentSession validation, which checks the implementation's control flow and package loading.
+This document separates paper observations, version-pinned Pi source inspection, and deterministic implementation tests. None of the repository's tests are real-model task-quality benchmarks.
 
 ## Paper observations
 
@@ -8,78 +8,74 @@ This document records two connected evidence sources: the paper's Terminal-Bench
 
 > PI also ends a run when a turn is cut short by the output cap, whereas OpenHands continues and openJiuwen re-prompts the model to continue with its partial reasoning kept (100 runs resumed, 48 of which went on to score above zero).
 
-The same paragraph says this resumption was decisive in **2 of 6** inspected matched pairs. It also reports provider-stream errors in **25 of Kimi's 62 PI runs on TB4**, attributing them to harness resilience rather than model behavior.
+The same paragraph says resumption was decisive in **2 of 6** inspected matched pairs. It reports provider-stream errors in **25 of Kimi's 62 PI runs on TB4**, attributing them to harness resilience rather than model behavior.
 
-The paper's Terminal-Bench 4.0 results establish that recovery and termination policy matter in these agent runs. Its limitations discuss the small matched-pair sample and the fact that the comparison does not isolate one component's causal effect. The figures are reported here as the paper's benchmark evidence for the problem this package addresses.
+These Terminal-Bench 4.0 observations motivate explicit recovery policy, but the small matched-pair sample does not isolate one component's causal effect. They are not this extension's success rate. In particular, the paper's partial-reasoning retention describes openJiuwen: **pi-continuity since 0.4.0 intentionally injects no partial text/reasoning, checkpoint, or hidden prompt**.
 
-The paper's conclusion also distinguishes a genuinely unfinished step from a human-required blocker (for example, a CAPTCHA). The extension's recovery policy asks the next model turn to report a human-required blocker in text and stop; it does not add an unconditional final-answer re-check.
+The paper also distinguishes unfinished work from human-required blockers such as CAPTCHA. A normal textual blocker/final answer does not trigger an unconditional extra requirements-check loop here.
 
-## Pi source inspected
+## Historical source inspection
 
-Local `packages/coding-agent/package.json` reports **1.0.3**. Source checkout:
+The original inspection used Pi **1.0.3**, source revision `04b97ef0007ad2d55615d0a545163387a701fc67`. The following links are revision-pinned:
 
-```text
-04b97ef0007ad2d55615d0a545163387a701fc67
-```
+- [Core truncated-tool protection and loop decisions](https://github.com/earendil-works/pi/blob/04b97ef0007ad2d55615d0a545163387a701fc67/packages/agent/src/agent-loop.ts#L258-L320): `length` tool calls receive synthetic errors instead of execution. Text/reasoning length stops without another continuation can exit the low-level loop.
+- [Session compaction/retry](https://github.com/earendil-works/pi/blob/04b97ef0007ad2d55615d0a545163387a701fc67/packages/coding-agent/src/core/agent-session.ts#L2917-L2999) and [`isRecoverableLength`](https://github.com/earendil-works/pi/blob/04b97ef0007ad2d55615d0a545163387a701fc67/packages/ai/src/utils/overflow.ts#L174-L184): below-cap length stops can recover under relevant settings. It is inaccurate to describe every pure-text length stop as unconditionally terminal; the integration baseline specifically uses an at-cap output with compaction enabled.
+- [Native retry/compaction/queue ordering](https://github.com/earendil-works/pi/blob/04b97ef0007ad2d55615d0a545163387a701fc67/packages/coding-agent/src/core/agent-session.ts#L1807-L1843) and [retry omission](https://github.com/earendil-works/pi/blob/04b97ef0007ad2d55615d0a545163387a701fc67/packages/coding-agent/src/core/agent-session.ts#L3713-L3752): native recovery precedes final settlement and omits failed assistant context.
+- [Retry classifier](https://github.com/earendil-works/pi/blob/04b97ef0007ad2d55615d0a545163387a701fc67/packages/ai/src/utils/retry.ts): `terminated` is a native retry signal; explicit aborted responses remain terminal.
+- [Provider message transformation](https://github.com/earendil-works/pi/blob/04b97ef0007ad2d55615d0a545163387a701fc67/packages/ai/src/api/transform-messages.ts#L195-L203): errored/aborted assistant protocol is not safe to replay.
+- [Eval final-response guards](https://github.com/earendil-works/pi/blob/04b97ef0007ad2d55615d0a545163387a701fc67/packages/evals/src/harness.ts#L238-L254): the harness awaits `session.prompt()` and rejects invalid final stop reasons or empty final stops. An extension must make an actual next request, not rewrite failure as success. The surrounding evaluator, not this guard alone, determines reward.
 
-All source links below are pinned to that revision, not moving `main`.
+Codex rounded-minute guidance was additionally checked against Pi **1.1.0**, revision `cdaf6c227d4718a72b59ccd02152c9614df44cfc`: [`parseErrorResponse`](https://github.com/earendil-works/pi/blob/cdaf6c227d4718a72b59ccd02152c9614df44cfc/packages/ai/src/api/openai-codex-responses.ts#L1596-L1623) can emit `Try again in ~N min.` from an HTTP reset timestamp. Other in-band stream errors can expose only `Codex error: The usage limit has been reached`, with no reset timestamp. The extension retains a 30-second approximate-minute margin and does not invent reset timestamps for guidance-less errors.
 
-### 1. Truncated tools are already protected
+## Current compatibility: Pi 1.5.2
 
-[`packages/agent/src/agent-loop.ts`](https://github.com/earendil-works/pi/blob/04b97ef0007ad2d55615d0a545163387a701fc67/packages/agent/src/agent-loop.ts#L258-L282) rejects tool calls from a `length` response with synthetic errors instead of executing potentially incomplete arguments. The tool batch then naturally continues. This is the fix identified as commit `351efc828` / PR [#6285](https://github.com/earendil-works/pi/pull/6285).
+Development dependencies pin `@earendil-works/pi-ai`, `@earendil-works/pi-agent-core`, and `@earendil-works/pi-coding-agent` to **1.5.2**. Pi modules remain host-provided peers, not bundled runtime dependencies. Test tool schemas use the separately pinned `typebox` development dependency, matching the Pi 1.5.x SDK API.
 
-pi-continuity relies on this core safety behavior, never executes tools itself, omits the interrupted protocol from the next model projection, and requests the next boundary turn without injecting any checkpoint or hidden prompt.
+Inspected published artifacts are version-pinned, not moving `main`:
 
-### 2. Pure text/reasoning length stops still have an exit path
+- [Extension API and boundary/context contracts](https://unpkg.com/@earendil-works/pi-coding-agent@1.5.2/dist/core/extensions/types.d.ts).
+- [Session projection contracts](https://unpkg.com/@earendil-works/pi-coding-agent@1.5.2/dist/core/session-manager.d.ts).
+- [Agent session recovery and settlement](https://unpkg.com/@earendil-works/pi-coding-agent@1.5.2/dist/core/agent-session.js).
+- [Agent lifecycle and queue selection](https://unpkg.com/@earendil-works/pi-agent-core@1.5.2/dist/agent.js).
+- [Core error hard-exits and truncated-tool execution protection](https://unpkg.com/@earendil-works/pi-agent-core@1.5.2/dist/agent-loop.js).
+- [Native transient error classifier](https://unpkg.com/@earendil-works/pi-ai@1.5.2/dist/utils/retry.js).
 
-The same loop sets `hasMoreToolCalls = false` when there are no tool calls. With no steering/follow-up message and no explicit finish-turn continuation decision, it exits and emits `agent_end` ([loop decision](https://github.com/earendil-works/pi/blob/04b97ef0007ad2d55615d0a545163387a701fc67/packages/agent/src/agent-loop.ts#L285-L320)).
+### Error recovery and cancellation
 
-**Important correction:** that is not the whole `AgentSession` behavior. The session's [`_checkCompaction()`](https://github.com/earendil-works/pi/blob/04b97ef0007ad2d55615d0a545163387a701fc67/packages/coding-agent/src/core/agent-session.ts#L2917-L2999) can compact and retry a length stop once. [`isRecoverableLength()`](https://github.com/earendil-works/pi/blob/04b97ef0007ad2d55615d0a545163387a701fc67/packages/ai/src/utils/overflow.ts#L174-L184) checks:
+Generic `Bad Request` / `{"detail":"Bad Request"}` does not establish a transient or permanent cause. After terminal checks, undiagnosed errors receive a separate default 2-attempt cap, also consuming stream and total budgets. `--continuity-unknown-retries=0` disables that path. The reported error shape is reproduced with scripted responses and thrown errors, not a claimed live-provider reproduction.
 
-```typescript
-message.stopReason === "length" && desiredMaxOutput > 0 && message.usage.output < desiredMaxOutput
-```
+The native retry classifier recognizes transport failures such as `ERR_HTTP2_STREAM_CANCEL` / `The pending stream has been canceled`. A broad cancellation-word exclusion would incorrectly suppress that recovery. Explicit user/request cancellation, including bare `aborted`, remains terminal. HTTP status is read from status-bearing prefixes/fields, not arbitrary byte counts, request IDs, or reset minutes.
 
-Thus, length stops **below** the desired output limit can recover under the relevant compaction settings. Stops **at** that limit are not covered by this condition; disabled compaction and exhausted recovery also leave exit paths. Describing all pure-text truncation as unconditionally terminal in 1.0.1 would be inaccurate.
+Core error turns invoke the finish hook but hard-exit afterwards. Therefore a `turn_end` continuation flag is not proof a next request occurred. Fallback decisions remain at `agent_before_settle`, after native recovery and queues.
 
-Our integration tests reproduce the at-cap baseline with compaction enabled, then show a next request when the extension is loaded. A `turn_end` boundary decision runs before post-run settlement and can request the next model turn without injecting a synthetic user message.
+`ExtensionContext.signal` is active while streaming. Agent clears its active run before session-level settlement, so sleeping at settlement cannot reliably observe SDK abort through that signal. All extension waits now use live `turn_end`; settlement only checks policy and returns drafts. Native retry stays first after the wait and may add its own backoff. This is a latency trade-off, not a native-retry settings override.
 
-### 3. Native retries exist, but discard failed assistant context
+### Projection safety and no prompt injection
 
-[`_handlePostAgentRun()`](https://github.com/earendil-works/pi/blob/04b97ef0007ad2d55615d0a545163387a701fc67/packages/coding-agent/src/core/agent-session.ts#L1807-L1843) performs native transient retries, compaction, and queued-message handling before the final boundary. [`_prepareRetry()`](https://github.com/earendil-works/pi/blob/04b97ef0007ad2d55615d0a545163387a701fc67/packages/coding-agent/src/core/agent-session.ts#L3713-L3752) durably omits the failed assistant from model projection and waits with backoff. Provider [`transformMessages()`](https://github.com/earendil-works/pi/blob/04b97ef0007ad2d55615d0a545163387a701fc67/packages/ai/src/api/transform-messages.ts#L195-L203) also skips errored/aborted assistants because incomplete reasoning/tool structures can be invalid to replay.
+A context edit replaces content or omits a projected contribution without changing raw metadata/history. The extension adds no `custom_message`, user text, quoted partial, interrupted-tool note, or other model-visible prompt. `custom` recovery counters are metadata only. Legacy pi-continuity prompt artifacts are excluded even when recovery is disabled, zero-budgeted, or fails closed. Already-omitted targets are not edited twice; active content-edited/restored targets remain eligible for omission.
 
-The public [`isRetryableAssistantError()` classifier](https://github.com/earendil-works/pi/blob/04b97ef0007ad2d55615d0a545163387a701fc67/packages/ai/src/utils/retry.ts) explicitly recognizes `terminated`. A finalized `stopReason: "error"` with that message follows native-first recovery; `stopReason: "aborted"` and explicit cancellation remain terminal.
+`Agent.continue()` immediately drains follow-up input when its transcript ends in an assistant. Omitting that tail prematurely can cause an old-task request first. With queued input after an error, the extension retains the tail until queue selection, then excludes broken protocol in request-time context. Input interruption is recorded before the host asynchronously enqueues transformed input. No cached text can be re-injected because no partial text is copied at all.
 
-This extension omits readable fragments from the next projection rather than replaying them, reuses the native classifier with additional premature-stream patterns, and schedules fallback only at `agent_before_settle`. It does not replace native retry settings or pretend there was no failed response.
+### Cooldown formats
 
-### 4. A tool may intentionally stop the loop
+The parser in `lib/retry-delay.ts` is extension policy, not a claim that every provider emits these formats. Synthetic fixtures cover the user-reported `cooldown: ...s`, `h`/`s`/`min`/`miutes`, related aliases, fractions, compounds, explicit fields, and numeric/date Retry-After. Several valid hints use the longest delay. Invalid/unrelated values are not inferred from arbitrary numbers.
 
-A tool batch can terminate the loop's normal follow-up. If the final substantive assistant block is a tool call and the session still reaches final settlement, the extension requests one next model turn after the completed tool result. Normal tool turns are left alone. The opt-out `--continuity-tool-tail=false` is important for tools intentionally designed to return structured data and end without text.
+A recognized usage limit without valid guidance polls every 10 minutes, initially for at most 5 hours / 30 attempts; after an exhausted window, later windows use 5 h 20 min / 32 attempts. These are bounded policy windows, not measured provider reset guarantees.
 
-### 5. Evals reject a final length stop
+## Deterministic validation
 
-[`packages/evals/src/harness.ts`, `promptAgent()`](https://github.com/earendil-works/pi/blob/04b97ef0007ad2d55615d0a545163387a701fc67/packages/evals/src/harness.ts#L238-L254) awaits `session.prompt()`, then rejects a final stop reason other than `stop` or `toolUse`. A final `length` throws. It also rejects an empty final `stop` response.
+The current suite uses a real **Pi 1.5.2 AgentSession** and in-memory faux provider, never real model APIs or credentials:
 
-An extension loaded into that session can change which assistant is final by actually making another request. It does not change this check or determine the reward. The outcome of a thrown exception depends on the surrounding evaluator; the guard itself does not assign a score.
+- `tests/extension.test.ts`: at-cap baseline, output shapes, native-first retry, no prompt injection, tool-tail behavior, history/projection safety, legacy cleanup, extension composition, and budgets.
+- `tests/terminated.test.ts`: `terminated`/thrown errors, native-first ordering, bounded fallback, cancellation, raw usage/history, and safe queued input.
+- `tests/error-recovery.test.ts`: generic/missing/unknown errors, independent/shared caps, terminal exclusions, reasoning-only responses, cancellation, and earlier boundary decisions.
+- `tests/usage-limit.test.ts` and `tests/retry-delay.test.ts`: virtual long waits, format parsing, rounding, malformed values, no early native 429 retry, zero-duration bounds, polling windows, and cancellation.
+- `tests/live-backoff.test.ts`: SDK abort without advancing the backoff clock, exhausted-native cancellation, steering/follow-up races, no partial/signature/tool-argument injection, and off behavior.
+- `tests/review-regressions.test.ts`: status/cancellation classification, deprecated helper bounds, fail-closed configuration, projection redactions, legacy cleanup, and native truncated-tool continuation after zero/exhausted extension budgets.
+- Isolated offline source/tarball RPC installation and `/pi-continuity` command loading; package manifest review excludes development dependencies, credentials, workspaces, and transcripts.
 
-### 6. Codex minute-based reset guidance
-
-The additional usage-limit implementation was checked against Pi **1.1.0** source revision `cdaf6c227d4718a72b59ccd02152c9614df44cfc`. [`parseErrorResponse()`](https://github.com/earendil-works/pi/blob/cdaf6c227d4718a72b59ccd02152c9614df44cfc/packages/ai/src/api/openai-codex-responses.ts#L1596-L1623) emits `You have hit your ChatGPT usage limit (plus plan). Try again in ~N min.` when the HTTP error includes a reset timestamp. The plan suffix is optional; `N` is the rounded remaining minutes, not a guarantee of the exact reset instant. Other transport/error paths may expose different wording.
-
-The extension recognizes explicit minute guidance in finalized error messages independently of the provider/login. It adds 30 seconds for `~` rounding, waits at the live `turn_end` cancellation boundary, then leaves native retry first refusal before its settlement fallback. This source observation is not a real-provider experiment; the virtual-clock tests validate only control flow.
-
-Other paths do not include a reset timestamp: the Codex response stream wraps an in-band `type: "error"` event as `Codex error: <message>`, so a finalized error can be only `Codex error: The usage limit has been reached` (same Pi 1.1.0 [event mapping](https://github.com/earendil-works/pi/blob/cdaf6c227d4718a72b59ccd02152c9614df44cfc/packages/ai/src/api/openai-codex-responses.ts) file; `resets_at` is available only on the HTTP 429 JSON body). The extension does not invent a reset time for this shape. It waits a fixed 10 minutes, retries the same task, and gives up after 30 attempts or 5 hours; once a window has been given up, later windows add a 20-minute buffer (32 attempts over 5 h 20 min) so the poll does not stop at the same instant the provider resets. The virtual-clock tests validate that polling control flow and its give-up bounds; they are not real-provider timing measurements.
+The earlier 138-test pre-release suite used Pi 1.0.3; 0.4.0 recorded 172 tests on Pi 1.5.0. Historical counts are not substitutes for validating the current build. Real-model comparisons would require separate authorization and reporting of models, prompts, budgets, repetitions, and failure accounting.
 
 ## Illustration provenance
 
-The README's PNG and animated GIF/MP4 are **mechanism storyboards**, illustrating the documented loop policy. They are not captured executions, new tests, live TUI recordings, or model-quality measurements. They do not plot the paper's 48/100 observation as this extension's success rate. [Rendering source and reproduction](assets.md).
-
-## Existing implementation validation
-
-- Deterministic unit tests for detection, budgets, projection omission, and cancellation/backoff.
-- The 138-test pre-release suite passed against the **published Pi 1.0.3 SDK**; the current 172-test suite passes against **Pi 1.5.0**, now the pinned development version. Integration tests use a real `AgentSession` and Pi's in-memory faux provider. No real model APIs or credentials are used.
-- Explicit `terminated` / `TypeError: terminated` fixtures in `tests/terminated.test.ts` cover empty/partial responses, native-first retry, exhausted-native fallback, no-checkpoint projection safety, budgets, cancellation, and queued steering input.
-- `tests/usage-limit.test.ts` uses a virtual clock to cover minute extraction, five-hour reset waits, exact and approximate zero-minute guidance, native 429 retry ordering, cancellation, queued input, total budgets, and no-checkpoint projection safety across provider/login error wording, plus the 10-minute guidance-less poll, its 5-hour give-up, the extended 5 h 20 min give-up after an exhausted window, and its independence from the resume cap.
-- Isolated offline RPC installation/command-load verification.
-
-These validate the extension's control flow and package loading. The paper's Terminal-Bench 4.0 results provide the benchmark evidence for the underlying recovery problem; a separate real-model comparison would measure this package's task outcomes.
+README PNG/GIF/MP4 assets are **mechanism storyboards**, not captured executions, live TUI recordings, or model-quality measurements. They do not present the paper's 48/100 observation as this extension's success rate. See [assets.md](assets.md) for provenance and reproduction.
